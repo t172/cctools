@@ -9,7 +9,7 @@ OBJECTS = resource_monitor_pb.o rmonitor_helper_comm.o resource_monitor.o resour
 PROGRAMS = resource_monitor piggybacker rmonitor_poll_example
 
 ifneq ($(CCTOOLS_STATIC),1)
-PROGRAMS += resource_monitor_histograms
+PROGRAMS += resource_monitor_histograms resource_monitor_split
 endif
 
 # currently only python bindings have been implemented
@@ -37,6 +37,13 @@ ifeq ($(CCTOOLS_STATIC),1)
 	@echo "resource_monitor_histograms cannot be built statically"
 else
 	$(CCTOOLS_LD) -O3 -fopenmp -o $@ $(CCTOOLS_INTERNAL_LDFLAGS) $(LOCAL_LDFLAGS) $^ $(LOCAL_LINKAGE) $(CCTOOLS_EXTERNAL_LINKAGE)
+endif
+
+resource_monitor_split: stats.o resource_monitor_split.o
+ifeq ($(CCTOOLS_STATIC),1)
+	@echo "resource_monitor_split cannot be built statically"
+else
+	$(CCTOOLS_LD) -O3 -o $@ $(CCTOOLS_INTERNAL_LDFLAGS) $(LOCAL_LDFLAGS) $^ $(LOCAL_LINKAGE) $(CCTOOLS_EXTERNAL_LINKAGE) -lm
 endif
 
 $(PROGRAMS): ../../dttools/src/libdttools.a
