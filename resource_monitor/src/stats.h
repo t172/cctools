@@ -23,15 +23,18 @@ void stats_init(struct stats *s);
 void stats_reset(struct stats *s);
 
 // Processes a value (adds it to the calculations)
-void stats_include(struct stats *s, double value);
+void stats_process(struct stats *s, double value);
 
-// Calculates the mean of the values processed so far
+// Calculates the mean of the processed values
 double stats_mean(struct stats *s);
 
-// Calculates the standard deviation of the values processed so far
+// Calculates the standard deviation of the processed values
 double stats_stddev(struct stats *s);
 
-/* double stats_median(struct stats *s); */
+// Calculates the median of the processed values
+double stats_median(struct stats *s);
+double stats_Q1(struct stats *s);
+double stats_Q3(struct stats *s);
 
 #endif
 //EOF

@@ -126,6 +126,8 @@ void process_cmdline(int argc, char *argv[]) {
 		cmdline.output_fields = list_create();
 		list_push_tail(cmdline.output_fields, xxstrdup("wall_time"));
 		list_push_tail(cmdline.output_fields, xxstrdup("cpu_time"));
+		list_push_tail(cmdline.output_fields, xxstrdup("memory"));
+		list_push_tail(cmdline.output_fields, xxstrdup("disk"));
 	}
 }
 
@@ -280,30 +282,36 @@ static FILE *open_category_file(const char *category, const char *filename) {
 
 void write_avgs(struct hash_table *grouping, const char *category) {
 	// Find ways to give up
-	if ( cmdline.output_fields == NULL ) {
-		warn(D_RMON, "No output fields, so nothing to write");
+	if ( hash_table_size(grouping) == 0 )
 		return;
-	}
 	if ( category == NULL || category[0] == '\0' ) {
 		warn(D_RMON, "No category given or empty string.");
 		return;
 	}
-	if ( hash_table_size(grouping) == 0 )
+	if ( cmdline.output_fields == NULL ) {
+		warn(D_RMON, "No output fields, so nothing to write");
 		return;
+	}
 
-	FILE *table_file = open_category_file(category, "table.dat");
 	const char *output_field;
-
-	struct hash_table *stats = hash_table_create(0, 0);
+	struct hash_table *output_file = hash_table_create(0, 0);
 	struct stats *stat;
+	struct hash_table *stats = hash_table_create(0, 0);
+
 	list_first_item(cmdline.output_fields);
 	while ( (output_field = list_next_item(cmdline.output_fields)) != 0 ) {
+		// Create a file for each output field
+		char *output_filename = string_format("%s.dat", output_field);
+		hash_table_insert(output_file, output_field, open_category_file(category, output_filename));
+		free(output_filename);
+
+		// Keep stats on each output field's values
 		stat = xxcalloc(sizeof(*stat), 1);
 		stats_init(stat);
 		hash_table_insert(stats, output_field, stat);
 	}
 
-	// Build array of matching split keys to sort them
+	// Build array of matching split keys and sort them
 	int num_splits = hash_table_size(grouping);
 	char **keys_sorted = xxmalloc(num_splits*sizeof(*keys_sorted));
 	struct hash_table *value_list;
@@ -315,7 +323,7 @@ void write_avgs(struct hash_table *grouping, const char *category) {
 	}
 	qsort(keys_sorted, num_splits, sizeof(*keys_sorted), string_compare);
 
-	// Iterate through split keys in order
+	// Iterate through split keys in sorted order
 	for ( index = 0; index < num_splits; ++index ) {
 		split_key = keys_sorted[index];
 		struct list *split_list;
@@ -330,12 +338,6 @@ void write_avgs(struct hash_table *grouping, const char *category) {
 		struct record *item;
 		list_first_item(split_list);
 		while ( (item = list_next_item(split_list)) != 0 ) {
-			/* if ( item->filename == NULL ) { */
-			/* 	fprintf(this_match_file, "-"); */
-			/* } else { */
-			/* 	fprintf(this_match_file, "%s", item->filename); */
-			/* } */
-
 			// Lookup value for each output field
 			list_first_item(cmdline.output_fields);
 			while ( (output_field = list_next_item(cmdline.output_fields)) != 0 ) {
@@ -365,36 +367,44 @@ void write_avgs(struct hash_table *grouping, const char *category) {
 				// Now we have a value, use it
 				fprintf(this_match_file, OUTPUT_FIELD_SEPARATOR "%g", value);
 				stat = hash_table_lookup(stats, output_field);
-				stats_include(stat, value);
+				stats_process(stat, value);
 			}
 			fprintf(this_match_file, OUTPUT_RECORD_SEPARATOR);
 		}
 		fclose(this_match_file);
 
-		// Print matching field (split_key) and number of matches
-		fprintf(table_file, "%s", split_key);
-		fprintf(table_file, OUTPUT_FIELD_SEPARATOR "%d", list_size(split_list));
-
 		// Print results
 		list_first_item(cmdline.output_fields);
 		while ( (output_field = list_next_item(cmdline.output_fields)) != 0 ) {
+			// Each output field's aggregated data goes to a separate file
+			FILE *outfile = hash_table_lookup(output_file, output_field);
+
+			// Print matching field (split_key) and number of matches
+			fprintf(outfile, "%s", split_key);
+			fprintf(outfile, OUTPUT_FIELD_SEPARATOR "%d", list_size(split_list));
+
+			// Print statistics
 			stat = hash_table_lookup(stats, output_field);
-			fprintf(table_file, OUTPUT_FIELD_SEPARATOR "%g", stats_mean(stat));
-			fprintf(table_file, OUTPUT_FIELD_SEPARATOR "%g", stats_stddev(stat));
+			fprintf(outfile, OUTPUT_FIELD_SEPARATOR "%g", stats_mean(stat));
+			fprintf(outfile, OUTPUT_FIELD_SEPARATOR "%g", stats_stddev(stat));
+			fprintf(outfile, OUTPUT_FIELD_SEPARATOR "%g", stats_Q1(stat));
+			fprintf(outfile, OUTPUT_FIELD_SEPARATOR "%g", stats_median(stat));
+			fprintf(outfile, OUTPUT_FIELD_SEPARATOR "%g", stats_Q3(stat));
 
 			// Re-initialize to zero for next iteration
 			stats_reset(stat);
+			fprintf(outfile, OUTPUT_RECORD_SEPARATOR);
 		}
-		fprintf(table_file, OUTPUT_RECORD_SEPARATOR);
 	}  // each split_key
 
 	// Clean up
 	free(keys_sorted);
-	fclose(table_file);
 	list_first_item(cmdline.output_fields);
 	while ( (output_field = list_next_item(cmdline.output_fields)) != 0 ) {
+		fclose(hash_table_lookup(output_file, output_field));
 		free(hash_table_lookup(stats, output_field));
 	}
+	hash_table_delete(output_file);
 	hash_table_delete(stats);
 }
 
