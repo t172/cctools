@@ -8,6 +8,9 @@ See the file COPYING for details.
 #include <stdio.h>
 #include <unistd.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 #include "debug.h"
 #include "stringtools.h"
@@ -29,18 +32,23 @@ See the file COPYING for details.
 // How to separate records in output (text) data files
 #define OUTPUT_RECORD_SEPARATOR "\n"
 
+// Name of gnuplot binary
+#define GNUPLOT_BINARY "gnuplot"
+
 // Filename for gnuplot scripts (one in each category's directory)
 #define GNUPLOT_SCRIPT_FILENAME "plot.gp"
 
 // Soft maxmimum on number of x-axis labels to put on a plot (if there
 // are more than twice this amount, they will be culled)
-#define GNUPLOT_SOFTMAX_XLABELS 50
+#define GNUPLOT_SOFTMAX_XLABELS 40
 
 #define CMDLINE_OPTS  "J:L:s:t:"
 #define OPT_JSON      'J'
 #define OPT_LIST      'L'
 #define OPT_SPLIT     's'
 #define OPT_THRESHOLD 't'
+
+#define DEFAULT_SPLIT_FIELD "host"
 
 #define TO_STR_EVAL(x) #x
 #define TO_STR(x) TO_STR_EVAL(x)
@@ -56,7 +64,7 @@ static struct {
 	.infile = NULL,
 	.infile_type = INFILE_UNDEF,
 	.output_dir = ".",
-	.split_field = NULL,
+	.split_field = DEFAULT_SPLIT_FIELD,
 	.threshold = 1,
 	.output_fields = NULL
 };
@@ -77,17 +85,20 @@ void record_delete(struct record *r) {
 }
 
 void show_usage(char *cmd) {
-	fprintf(stderr, "Usage:\n  %s [opts] -%c <field> (-%c <listfile> | -%c <jsonfile>) <outdir>\n\n", cmd, OPT_SPLIT, OPT_LIST, OPT_JSON);
-	fprintf(stderr, "Options:\n");
-	fprintf(stderr, "  -%c <listfile>   use summary list file\n", OPT_LIST);
-	fprintf(stderr, "  -%c <jsonfile>   use JSON file with encoded summaries\n", OPT_JSON);
-	fprintf(stderr, "  -%c <field>      split on <field>\n", OPT_SPLIT);
+	fprintf(stderr, "Usage:\n  %s [opts] (-%c <listfile> | -%c <jsonfile>) <outdir>\n", cmd, OPT_LIST, OPT_JSON);
+	fprintf(stderr, "\nRequired: (one of the following)\n");
+	fprintf(stderr, "  -%c <jsonfile>   read file with JSON-encoded summaries\n", OPT_JSON);
+	fprintf(stderr, "  -%c <listfile>   read file with list of summary pathnames\n", OPT_LIST);
+	fprintf(stderr, "\nOptions:\n");
+	fprintf(stderr, "  -%c <field>      split on <field> (default = \"%s\")\n", OPT_SPLIT, DEFAULT_SPLIT_FIELD);
 	fprintf(stderr, "  -%c <threshold>  set threshold to <threshold> matches\n", OPT_THRESHOLD);
 }
 
 void process_cmdline(int argc, char *argv[]) {
+	int used_opts = 0;
 	int ch;
 	while( (ch = getopt(argc, argv, CMDLINE_OPTS)) != -1 ) {
+		used_opts = 1;
 		switch ( ch )		{
 			case OPT_LIST:
 				cmdline.infile_type = INFILE_LIST;
@@ -109,7 +120,12 @@ void process_cmdline(int argc, char *argv[]) {
 				break;
 		}
 	}
+
+	// Output directory must be given
+	cmdline.output_dir = argv[optind];
 	if ( argc - optind < 1 ) {
+		if ( used_opts )
+			fprintf(stderr, "No output directory specified.\n");
 		show_usage(argv[0]);
 		exit(EXIT_FAILURE);
 	}
@@ -121,11 +137,8 @@ void process_cmdline(int argc, char *argv[]) {
 		exit(EXIT_FAILURE);
 	}
 
-	// Output directory must be given
-	cmdline.output_dir = argv[optind];
-
 	// Split field must be given
-	if ( cmdline.split_field == NULL ) {
+	if ( cmdline.split_field == NULL || *cmdline.split_field == '\0' ) {
 		fprintf(stderr, "No split field specified.\n");
 		show_usage(argv[0]);
 		exit(EXIT_FAILURE);
@@ -137,6 +150,7 @@ void process_cmdline(int argc, char *argv[]) {
 		list_push_tail(cmdline.output_fields, xxstrdup("wall_time"));
 		list_push_tail(cmdline.output_fields, xxstrdup("cpu_time"));
 		list_push_tail(cmdline.output_fields, xxstrdup("memory"));
+		list_push_tail(cmdline.output_fields, xxstrdup("virtual_memory"));
 		list_push_tail(cmdline.output_fields, xxstrdup("disk"));
 	}
 }
@@ -186,15 +200,28 @@ void read_jsonfile(const char *jsonfile, struct list *dst) {
 
 	printf("Reading JSON objects from \"%s\"\n", jsonfile);
 
+	int parse_errors = 0;
 	long count = 0;
 	struct jx *json;
-	while ( (json = jx_parse_stream(jsonfile_f)) != NULL ) {
+	for (;;) {
+		if ( (json = jx_parse_stream(jsonfile_f)) == NULL ) {
+			if ( feof(jsonfile_f) ) {
+				break;
+			} else {
+				warn(D_RMON, "JSON Parser error at file position %ld bytes", ftell(jsonfile_f));
+				parse_errors++;
+				continue;
+			}
+		}
 		struct record *new_record = xxmalloc(sizeof(*new_record));
 		new_record->filename = NULL;
 		new_record->json = json;
 		list_push_tail(dst, new_record);
 		count++;
 	}
+	if ( parse_errors != 0 )
+		warn(D_RMON, "Found %d errors parsing \"%s\".", parse_errors, jsonfile);
+	printf("Stopped reading at position %ld\n", ftell(jsonfile_f));
 	fclose(jsonfile_f);
 	printf("Read %ld JSON objects.\n", count);
 }
@@ -222,7 +249,7 @@ struct hash_table *group_by_field(struct list *list, const char *field) {
 		list_push_tail(bucket, item);
 	}
 	if ( dropped_summaries > 0 )
-		warn(D_RMON, "Dropped %d of %d summaries when grouping by field \"%s\".\n", dropped_summaries, field);
+		warn(D_RMON, "Dropped %d summaries when grouping by field \"%s\".\n", dropped_summaries, field);
 	printf("Split into %d groups by field \"%s\".\n", num_groups, field);
 	return grouped;
 }
@@ -244,15 +271,22 @@ void filter_by_threshold(struct hash_table *grouping, int threshold) {
 		printf("Filtered out %d groups with fewer than %d matches.\n", filtered_groups, threshold);
 }
 
-// Filename for a specific output field's data
+// Filename for a specific output field's data.  Returns a string that
+// must be freed.
 inline static char *outfield_filename(const char *outfield) {
 	return string_format("%s.dat", outfield);
+}
+
+// Name of directory in which to place stuff for a specific category.
+// Returns a string that must be freed.
+inline static char *category_directory(const char *category) {
+	return string_format("%s/%s", cmdline.output_dir, category);
 }
 
 // Opens an output file with the given name in a subdirectory created
 // for the given category.
 static FILE *open_category_file(const char *category, const char *filename) {
-	char *outdir = string_format("%s/%s", cmdline.output_dir, category);
+	char *outdir = category_directory(category);
 	if ( !create_dir(outdir, 0755) )
 		fatal("Cannot create output directory \"%s\"", outdir);
 
@@ -430,16 +464,16 @@ static char *presentation_string(const char *s) {
 	// Capitalize "cpu" to "CPU"
 	for ( pos = str; (pos = strstr(pos, "cpu")); strncpy(pos, "CPU", 3) );
 
-	// Capitalize first letter of words
+	// Capitalize the first letter of words
 	for ( pos = str; *pos != '\0'; ) {
 		if ( *pos >= 'a' && *pos <= 'z' )
 			*pos -= 'a' - 'A';
 		while ( *pos != '\0' ) {
-			if ( *pos != ' ' ) {
-				pos++;
-			} else {
+			if ( *pos == ' ' || *pos == '\t' ) {
 				pos++;
 				break;
+			} else {
+				pos++;
 			}
 		}
 	}
@@ -490,17 +524,17 @@ void plotscript_outfield(FILE *f, const char *outfield, struct hash_table *units
 	free(data_filename);
 }
 
-void plot_category(struct hash_table *grouping, const char *category, struct hash_table *units) {
+int write_plotscript_for_category(struct hash_table *grouping, const char *category, struct hash_table *units) {
 	// Find ways to give up
 	if ( hash_table_size(grouping) == 0 )
-		return;
+		return 0;
 	if ( category == NULL || category[0] == '\0' ) {
 		warn(D_RMON, "No category given or empty string.");
-		return;
+		return 0;
 	}
 	if ( cmdline.output_fields == NULL ) {
 		warn(D_RMON, "No output fields, so nothing to write");
-		return;
+		return 0;
 	}
 
 	// Tally total number of summaries
@@ -529,6 +563,42 @@ void plot_category(struct hash_table *grouping, const char *category, struct has
 	while ( (output_field = list_next_item(cmdline.output_fields)) != 0 ) {
 		plotscript_outfield(gnuplot_script, output_field, units);
 	}
+	return 1;
+}
+
+void plot_category(struct hash_table *grouping, const char *category, struct hash_table *units) {
+	if ( !write_plotscript_for_category(grouping, category, units) )
+		return;
+
+	/* printf("Plotting category \"%s\"\n", category); */
+	/* errno = 0; */
+	/* pid_t pid; */
+	/* if ( (pid = fork()) < 0 ) { // error */
+	/* 	fatal("Cannot fork process: %s", strerror(errno)); */
+	/* } else if ( pid > 0 ) { // child */
+	/* 	// Change to directory where category stuff goes */
+	/* 	char *dir = category_directory(category); */
+	/* 	if ( chdir(dir) != 0 ) */
+	/* 		fatal("Cannot change directory to \"%s\".", dir); */
+	/* 	free(dir); */
+
+	/* 	// Invoke gnuplot */
+	/* 	errno = 0; */
+	/* 	printf("%s %s\n", GNUPLOT_BINARY, GNUPLOT_SCRIPT_FILENAME); */
+	/* 	execlp(GNUPLOT_BINARY, GNUPLOT_BINARY, GNUPLOT_SCRIPT_FILENAME, (char *)NULL); */
+	/* 	fatal("Error executing plotter: %s", strerror(errno)); */
+	/* 	exit(EXIT_FAILURE); */
+	/* } else { // parent */
+	/* 	int status; */
+	/* 	waitpid(pid, &status, 0); */
+	/* 	if ( WIFEXITED(status) ) { */
+	/* 		if ( WEXITSTATUS(status) != EXIT_SUCCESS ) { */
+	/* 			warn(D_RMON, "Child exited with status %d", WEXITSTATUS(status)); */
+	/* 		} */
+	/* 	} else { */
+	/* 		warn(D_RMON, "Child exited abnormally."); */
+	/* 	} */
+	/* } */
 }
 
 int main(int argc, char *argv[]) {
