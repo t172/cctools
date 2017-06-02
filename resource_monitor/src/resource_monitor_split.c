@@ -29,11 +29,21 @@ See the file COPYING for details.
 // How to separate records in output (text) data files
 #define OUTPUT_RECORD_SEPARATOR "\n"
 
+// Filename for gnuplot scripts (one in each category's directory)
+#define GNUPLOT_SCRIPT_FILENAME "plot.gp"
+
+// Soft maxmimum on number of x-axis labels to put on a plot (if there
+// are more than twice this amount, they will be culled)
+#define GNUPLOT_SOFTMAX_XLABELS 50
+
 #define CMDLINE_OPTS  "J:L:s:t:"
 #define OPT_JSON      'J'
 #define OPT_LIST      'L'
 #define OPT_SPLIT     's'
 #define OPT_THRESHOLD 't'
+
+#define TO_STR_EVAL(x) #x
+#define TO_STR(x) TO_STR_EVAL(x)
 
 static struct {
 	char *infile;
@@ -234,6 +244,11 @@ void filter_by_threshold(struct hash_table *grouping, int threshold) {
 		printf("Filtered out %d groups with fewer than %d matches.\n", filtered_groups, threshold);
 }
 
+// Filename for a specific output field's data
+inline static char *outfield_filename(const char *outfield) {
+	return string_format("%s.dat", outfield);
+}
+
 // Opens an output file with the given name in a subdirectory created
 // for the given category.
 static FILE *open_category_file(const char *category, const char *filename) {
@@ -250,37 +265,7 @@ static FILE *open_category_file(const char *category, const char *filename) {
 	return f;
 }
 
-/* // Given a hash_table of lists (assuming all are in the same */
-/* // category), writes the filenames of the summaries, dividing by keys */
-/* // of the hash_table. */
-/* void write_lists(struct hash_table *grouping, const char *category) { */
-/* 	char *field; */
-/* 	struct list *list; */
-
-/* 	if ( category == NULL || category[0] == '\0' ) { */
-/* 		warn(D_RMON, "No category given or empty string."); */
-/* 		return; */
-/* 	} */
-
-/* 	hash_table_firstkey(grouping); */
-/* 	while ( hash_table_nextkey(grouping, &field, (void **)&list) ) { */
-/* 		FILE *listfile; */
-/* 		struct record *item; */
-
-/* 		char *filename = string_format("%s.list", field); */
-/* 		listfile = open_category_file(category, filename); */
-
-/* 		list_first_item(list); */
-/* 		while ( (item = list_next_item(list)) != 0 ) { */
-/* 			fprintf(listfile, "%s\n", item->filename); */
-/* 		} */
-
-/* 		fclose(listfile); */
-/* 		free(filename); */
-/* 	} */
-/* } */
-
-void write_avgs(struct hash_table *grouping, const char *category) {
+void write_avgs(struct hash_table *grouping, const char *category, struct hash_table *units) {
 	// Find ways to give up
 	if ( hash_table_size(grouping) == 0 )
 		return;
@@ -301,9 +286,11 @@ void write_avgs(struct hash_table *grouping, const char *category) {
 	list_first_item(cmdline.output_fields);
 	while ( (output_field = list_next_item(cmdline.output_fields)) != 0 ) {
 		// Create a file for each output field
-		char *output_filename = string_format("%s.dat", output_field);
-		hash_table_insert(output_file, output_field, open_category_file(category, output_filename));
+		char *output_filename = outfield_filename(output_field);
+		FILE *outfile = open_category_file(category, output_filename);
+		hash_table_insert(output_file, output_field, outfile);
 		free(output_filename);
+		fprintf(outfile, "#%s summaries mean stddev whisker_low Q1 median Q3 whisker_high\n", cmdline.split_field);
 
 		// Keep stats on each output field's values
 		stat = xxcalloc(sizeof(*stat), 1);
@@ -322,6 +309,8 @@ void write_avgs(struct hash_table *grouping, const char *category) {
 		keys_sorted[index++] = split_key;
 	}
 	qsort(keys_sorted, num_splits, sizeof(*keys_sorted), string_compare);
+
+	int warned_inconsistent_units = 0;
 
 	// Iterate through split keys in sorted order
 	for ( index = 0; index < num_splits; ++index ) {
@@ -346,6 +335,7 @@ void write_avgs(struct hash_table *grouping, const char *category) {
 				if ( jx_value == NULL )
 					continue;
 
+				struct jx *jx_unit;
 			evaluate_jx_value:
 				switch ( jx_value->type ) {
 				case JX_DOUBLE:
@@ -355,6 +345,22 @@ void write_avgs(struct hash_table *grouping, const char *category) {
 					value = jx_value->u.integer_value;
 					break;
 				case JX_ARRAY:
+					// Keep track of the unit of measure
+					jx_unit = jx_array_index(jx_value, 1);
+					if ( jx_unit != NULL && jx_unit->type == JX_STRING ) {
+						char *previous_unit = hash_table_lookup(units, output_field);
+						if ( previous_unit == NULL ) {
+							hash_table_insert(units, output_field, xxstrdup(jx_unit->u.string_value));
+						} else {
+							if ( strcmp(previous_unit, jx_unit->u.string_value) != 0 && !warned_inconsistent_units ) {
+								warn(D_RMON, "Encountered inconsistent units for \"%s\": \"%s\" and \"%s\".",
+										 output_field, previous_unit, jx_unit->u.string_value);
+								warned_inconsistent_units = 1;
+							}
+						}
+					}
+
+					// First is the value
 					jx_value = jx_array_index(jx_value, 0);
 					if ( jx_value == NULL )
 						continue;
@@ -387,9 +393,11 @@ void write_avgs(struct hash_table *grouping, const char *category) {
 			stat = hash_table_lookup(stats, output_field);
 			fprintf(outfile, OUTPUT_FIELD_SEPARATOR "%g", stats_mean(stat));
 			fprintf(outfile, OUTPUT_FIELD_SEPARATOR "%g", stats_stddev(stat));
+			fprintf(outfile, OUTPUT_FIELD_SEPARATOR "%g", stats_whisker_low(stat));
 			fprintf(outfile, OUTPUT_FIELD_SEPARATOR "%g", stats_Q1(stat));
 			fprintf(outfile, OUTPUT_FIELD_SEPARATOR "%g", stats_median(stat));
 			fprintf(outfile, OUTPUT_FIELD_SEPARATOR "%g", stats_Q3(stat));
+			fprintf(outfile, OUTPUT_FIELD_SEPARATOR "%g", stats_whisker_high(stat));
 
 			// Re-initialize to zero for next iteration
 			stats_reset(stat);
@@ -408,7 +416,119 @@ void write_avgs(struct hash_table *grouping, const char *category) {
 	hash_table_delete(stats);
 }
 
-void plot_category(struct hash_table *grouping, const char *category) {
+// Make a string pretty for formal presentation.  Returns a new string
+// that must be freed.
+static char *presentation_string(const char *s) {
+	char *str = xxstrdup(s);
+	char *pos;
+
+	// Change underscores "_" to spaces " "
+	for ( pos = str; *pos != '\0'; ++pos )
+		if ( *pos == '_' )
+			*pos = ' ';
+
+	// Capitalize "cpu" to "CPU"
+	for ( pos = str; (pos = strstr(pos, "cpu")); strncpy(pos, "CPU", 3) );
+
+	// Capitalize first letter of words
+	for ( pos = str; *pos != '\0'; ) {
+		if ( *pos >= 'a' && *pos <= 'z' )
+			*pos -= 'a' - 'A';
+		while ( *pos != '\0' ) {
+			if ( *pos != ' ' ) {
+				pos++;
+			} else {
+				pos++;
+				break;
+			}
+		}
+	}
+	return str;
+}
+
+// Writes the gnuplot script for one specific output field
+void plotscript_outfield(FILE *f, const char *outfield, struct hash_table *units) {
+	char *pretty_outfield = presentation_string(outfield);
+	char *pretty_splitfield = presentation_string(cmdline.split_field);
+	char *data_filename = outfield_filename(outfield);
+
+	fprintf(f, "\n# %s\n", outfield);
+	fprintf(f, "set output '%s.png'\n", outfield);
+	fprintf(f, "set title '{/=16 %s vs. %s'.title_suffix.'}'\n", pretty_outfield, pretty_splitfield);
+
+	// Reduce the number of xtic labels
+	fprintf(f, "xskip = 1; n = system(\"wc -l %s\")\n", data_filename);
+	fprintf(f, "if (n > " TO_STR(GNUPLOT_SOFTMAX_XLABELS) ") xskip = int(n/" TO_STR(GNUPLOT_SOFTMAX_XLABELS) ")\n");
+
+	// Determine unit of measure
+	char *unit = hash_table_lookup(units, outfield);
+	char *gnuplot_unit_conversion = "";
+
+	// Convert seconds to hours
+	if ( unit != NULL && strcmp(unit, "s") == 0 ) {
+		unit = "hr";
+		gnuplot_unit_conversion = "/3600";
+	}
+
+	// Output field with unit
+	fprintf(f, "set ylabel '{/=14 %s", pretty_outfield);
+	if ( unit != NULL ) {
+		fprintf(f, " (%s)", unit);
+	}
+	fprintf(f, "}'\n");
+
+	// Mean as dot and stddev as error bars
+	//fprintf(f, "plot '%s' u 0:3:xticlabels(strcol(1)) w points pt 7 lc rgb 'black', \\\n\t'' u 0:3:4 with yerrorbars ls 1\n", data_filename);
+
+	// Boxplots
+	fprintf(f, "set boxwidth 0.5 absolute\n");
+	fprintf(f, "plot \"<sed 's/\\.crc\\.nd\\.edu//' %1$s\" u 0:($6%2$s):($5%2$s):($9%2$s):($8%2$s):xticlabels(int(column(0))%%xskip==0?strcol(1):'') w candlesticks ls 2, \\\n"
+	           "\t'' u 0:($7%2$s):($7%2$s):($7%2$s):($7%2$s) w candlesticks ls 1 lw 2\n", data_filename, gnuplot_unit_conversion);
+
+	free(pretty_outfield);
+	free(pretty_splitfield);
+	free(data_filename);
+}
+
+void plot_category(struct hash_table *grouping, const char *category, struct hash_table *units) {
+	// Find ways to give up
+	if ( hash_table_size(grouping) == 0 )
+		return;
+	if ( category == NULL || category[0] == '\0' ) {
+		warn(D_RMON, "No category given or empty string.");
+		return;
+	}
+	if ( cmdline.output_fields == NULL ) {
+		warn(D_RMON, "No output fields, so nothing to write");
+		return;
+	}
+
+	// Tally total number of summaries
+	long num_summaries = 0;
+	char *split_key;
+	struct list *split_list;
+	hash_table_firstkey(grouping);
+	while ( hash_table_nextkey(grouping, &split_key, (void **)&split_list) != 0 ) {
+		num_summaries += list_size(split_list);
+	}
+
+	FILE *gnuplot_script = open_category_file(category, GNUPLOT_SCRIPT_FILENAME);
+	fprintf(gnuplot_script, "set terminal pngcairo enhanced color size 1072,768\n");
+	fprintf(gnuplot_script, "set key off\n");
+	fprintf(gnuplot_script, "set xtics nomirror rotate by 60 right\n");
+	fprintf(gnuplot_script, "set style line 1 lc rgb 'black'\n");
+	fprintf(gnuplot_script, "set style line 2 lc rgb 'gray50'\n");
+	fprintf(gnuplot_script, "title_suffix = '\t(%ld \"%s\" Summaries)'\n", num_summaries, category);
+
+	char *pretty_splitfield = presentation_string(cmdline.split_field);
+	fprintf(gnuplot_script, "set xlabel '{/=14 %s  (%d total)}'\n", pretty_splitfield, hash_table_size(grouping));
+	free(pretty_splitfield);
+
+	char *output_field;
+	list_first_item(cmdline.output_fields);
+	while ( (output_field = list_next_item(cmdline.output_fields)) != 0 ) {
+		plotscript_outfield(gnuplot_script, output_field, units);
+	}
 }
 
 int main(int argc, char *argv[]) {
@@ -439,9 +559,20 @@ int main(int argc, char *argv[]) {
 		printf("Subdividing category \"%s\"...\n", category);
 		struct hash_table *split_category = group_by_field(list_in_category, cmdline.split_field);
 		filter_by_threshold(split_category, cmdline.threshold);
-		//write_lists(split_category, category);
-		write_avgs(split_category, category);
-		plot_category(split_category, category);
+
+		// Keep track of units encountered
+		struct hash_table *units = hash_table_create(0, 0);
+
+		// Calculate statistics, write output files, and plot
+		write_avgs(split_category, category, units);
+		plot_category(split_category, category, units);
+
+		// Free values from hash tables
+		char *output_field, *unit_str;
+		hash_table_firstkey(units);
+		while ( hash_table_nextkey(units, &output_field, (void **)&unit_str) != 0 )
+			free(unit_str);
+		hash_table_delete(units);
 
 		struct list *split_list;
 		char *split_field;

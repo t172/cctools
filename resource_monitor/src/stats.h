@@ -31,10 +31,22 @@ double stats_mean(struct stats *s);
 // Calculates the standard deviation of the processed values
 double stats_stddev(struct stats *s);
 
-// Calculates the median of the processed values
+// Calculates the median (Q2) of the processed values
 double stats_median(struct stats *s);
+
+// Calculates Q1 (lower quartile) of the processed values
 double stats_Q1(struct stats *s);
+
+// Calculates Q3 (upper quartile) of the processed values
 double stats_Q3(struct stats *s);
+
+// Calculates the low whisker position, the lowest value within 1.5
+// times the inter-quartile range (IQR) of Q1.
+double stats_whisker_low(struct stats *s);
+
+// Calculates the high whisker position, the highest value within 1.5
+// times the inter-quartile range (IQR) of Q3.
+double stats_whisker_high(struct stats *s);
 
 #endif
 //EOF

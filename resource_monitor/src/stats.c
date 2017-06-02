@@ -34,14 +34,12 @@ static void stats_sort(struct stats *s) {
 	s->dirty = 0;
 }
 
-// Resets stats and initializes a values allocation
 void stats_init(struct stats *s) {
 	stats_reset(s);
 	s->values_alloc = STATS_VALUES_INITSIZE;
 	s->values = xxmalloc(s->values_alloc*sizeof(*s->values));
 }
 
-// Resets stats to zero
 void stats_reset(struct stats *s) {
 	s->sum = 0;
 	s->sum_squares = 0;
@@ -107,3 +105,36 @@ double stats_Q3(struct stats *s) {
 	}
 }
 
+double stats_whisker_low(struct stats *s) {
+	if ( s->count == 0 )
+		return NAN;
+
+	const double q1 = stats_Q1(s);
+	const double threshold = q1 - 1.5*(stats_Q3(s) - q1);
+
+	double lowest;
+	for ( int i=0; i < s->count; ++i) {
+		lowest = s->values[i];
+		if ( lowest >= threshold )
+			break;
+	}
+	return lowest;
+}
+
+double stats_whisker_high(struct stats *s) {
+	if ( s->count == 0 )
+		return NAN;
+
+	const double q3 = stats_Q3(s);
+	const double threshold = q3 + 1.5*(q3 - stats_Q1(s));
+
+	double highest;
+	for ( int i=s->count-1; i >= 0; --i) {
+		highest = s->values[i];
+		if ( highest <= threshold )
+			break;
+	}
+	return highest;
+}
+
+//EOF
