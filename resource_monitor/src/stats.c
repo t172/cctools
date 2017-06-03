@@ -12,6 +12,7 @@ See the file COPYING for details.
 
 #include "stats.h"
 #include "xxmalloc.h"
+#include "histogram.h"
 
 // Initial size of values buffer in struct stats (doubles as needed)
 #define STATS_VALUES_INITSIZE (4096/sizeof(double))
@@ -28,10 +29,15 @@ static int stats_values_cmp(const void *a, const void *b) {
 	return (*A > *B) - (*A < *B);
 }
 
-// Sorts the values in the stats
+// Sorts the values in the stats.  The dirty flag indicates that
+// something has been written to the values since the last time they
+// were sorted.  This prevents unnecessary sorting when the dirty flag
+// is not set.
 static void stats_sort(struct stats *s) {
-	qsort(s->values, s->count, sizeof(*s->values), stats_values_cmp);
-	s->dirty = 0;
+	if ( s->dirty ) {
+		qsort(s->values, s->count, sizeof(*s->values), stats_values_cmp);
+		s->dirty = 0;
+	}
 }
 
 void stats_init(struct stats *s) {
@@ -47,7 +53,7 @@ void stats_reset(struct stats *s) {
 	s->dirty = 0;
 }
 
-void stats_process(struct stats *s, double value) {
+void stats_insert(struct stats *s, double value) {
 	s->sum += value;
 	s->sum_squares += value*value;
 	if ( s->count == (long)s->values_alloc )
@@ -65,10 +71,23 @@ double stats_stddev(struct stats *s) {
 	return sqrt(s->sum_squares / s->count - mean*mean);
 }
 
+double stats_minimum(struct stats *s) {
+	if ( s->count == 0 )
+		return NAN;
+	stats_sort(s);
+	return s->values[0];
+}
+
+double stats_maximum(struct stats *s) {
+	if ( s->count == 0 )
+		return NAN;
+	stats_sort(s);
+	return s->values[s->count - 1];
+}
+
 static double stats_middle_between(struct stats *s, int start, int end) {
-	if ( s->dirty ) {
-		stats_sort(s);
-	}
+	stats_sort(s);
+
 	int delta = end - start;
 	if ( delta == 0 ) {
 		// No values, no median
@@ -135,6 +154,46 @@ double stats_whisker_high(struct stats *s) {
 			break;
 	}
 	return highest;
+}
+
+struct histogram *stats_build_histogram(struct stats *s, enum outlier_handling h) {
+	if ( s->count == 0 )
+		return NULL;
+
+	// Determine full range of values to use
+	double low, high;
+	if ( h == STATS_DISCARD_OUTLIERS ) {
+		low = stats_whisker_low(s);
+		high = stats_whisker_high(s);
+	} else { // keep outliers
+		low = stats_minimum(s);
+		high = stats_maximum(s);
+	}
+
+	// Zero range means all values are the same
+	if ( high == low ) {
+		// Make a (hopefully) negligible but non-zero range
+		high += high/1e6;
+	}
+
+	// Traditionally we want sqrt(n) buckets for n values
+	double bucket_size = fabs((high - low)/((int)sqrt(s->count)));
+	struct histogram *hist = histogram_create(bucket_size);
+
+	// Throw values into histogram
+	if ( h == STATS_DISCARD_OUTLIERS ) {
+		double value;
+		for ( int i=0; i < s->count; ++i ) {
+			value = s->values[i];
+			if ( value >= low && value <= high )
+				histogram_insert(hist, value);
+		}
+	} else { // keep outliers
+		for ( int i=0; i < s->count; ++i ) {
+			histogram_insert(hist, s->values[i]);
+		}
+	}
+	return hist;
 }
 
 //EOF

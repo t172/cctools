@@ -21,6 +21,7 @@ See the file COPYING for details.
 #include "jx_pretty_print.h"
 #include "list.h"
 #include "hash_table.h"
+#include "histogram.h"
 #include "stats.h"
 
 // What a category is called in the JSON summary data
@@ -31,6 +32,10 @@ See the file COPYING for details.
 
 // How to separate records in output (text) data files
 #define OUTPUT_RECORD_SEPARATOR "\n"
+
+// A numeric placeholder for (text) data files (not-a-number is
+// ignored by gnuplot and not plotted)
+#define OUTPUT_PLACEHOLDER "NAN"
 
 // Name of gnuplot binary
 #define GNUPLOT_BINARY "gnuplot"
@@ -150,7 +155,7 @@ void process_cmdline(int argc, char *argv[]) {
 		list_push_tail(cmdline.output_fields, xxstrdup("wall_time"));
 		list_push_tail(cmdline.output_fields, xxstrdup("cpu_time"));
 		list_push_tail(cmdline.output_fields, xxstrdup("memory"));
-		list_push_tail(cmdline.output_fields, xxstrdup("virtual_memory"));
+		//list_push_tail(cmdline.output_fields, xxstrdup("virtual_memory"));
 		list_push_tail(cmdline.output_fields, xxstrdup("disk"));
 	}
 }
@@ -221,7 +226,7 @@ void read_jsonfile(const char *jsonfile, struct list *dst) {
 	}
 	if ( parse_errors != 0 )
 		warn(D_RMON, "Found %d errors parsing \"%s\".", parse_errors, jsonfile);
-	printf("Stopped reading at position %ld\n", ftell(jsonfile_f));
+	//printf("Stopped reading at position %ld\n", ftell(jsonfile_f));
 	fclose(jsonfile_f);
 	printf("Read %ld JSON objects.\n", count);
 }
@@ -297,6 +302,62 @@ static FILE *open_category_file(const char *category, const char *filename) {
 	free(outdir);
 	free(pathname);
 	return f;
+}
+
+static void write_histograms_file(struct hash_table *stats_table, const char *split_key, const char *category) {
+	char *hist_filename = string_format("%s.hist", split_key);
+	FILE *hist_file = open_category_file(category, hist_filename);
+	free(hist_filename);
+	fprintf(hist_file, "#");
+
+	const int num_fields = list_size(cmdline.output_fields);
+	struct histogram **histograms = xxmalloc(num_fields*sizeof(*histograms));
+	double **buckets = xxmalloc(num_fields*sizeof(*buckets));
+	int max_histsize = 0;
+
+	// Build histograms
+	char *outfield;
+	list_first_item(cmdline.output_fields);
+	const char *sep = "";
+	for ( int field=0; (outfield = list_next_item(cmdline.output_fields)) != 0; ++field ) {
+		struct stats *stat = hash_table_lookup(stats_table, outfield);
+		struct histogram *hist = stats_build_histogram(stat, STATS_KEEP_OUTLIERS);
+		histograms[field] = hist;
+		if ( hist != NULL ) {
+			buckets[field] = histogram_buckets(hist);
+			if ( histogram_size(hist) > max_histsize )
+				max_histsize = histogram_size(hist);
+		}
+
+		// Print header with column names
+		fprintf(hist_file, "%s%s_start" OUTPUT_FIELD_SEPARATOR "%s_freq", sep, outfield, outfield);
+		sep = OUTPUT_FIELD_SEPARATOR;
+	}
+	fprintf(hist_file, OUTPUT_RECORD_SEPARATOR);
+
+	// Write them to file
+	for ( int bucket=0; bucket < max_histsize; ++bucket ) {
+		sep = "";
+		for ( int field=0; field < num_fields; ++field ) {
+			struct histogram *hist = histograms[field];
+			if ( hist == NULL || bucket >= histogram_size(hist) ) {
+				// Insert placeholders
+				fprintf(hist_file, "%s" OUTPUT_PLACEHOLDER OUTPUT_FIELD_SEPARATOR OUTPUT_PLACEHOLDER, sep);
+			} else {
+				const double start = buckets[field][bucket];
+				fprintf(hist_file, "%s%g" OUTPUT_FIELD_SEPARATOR "%d", sep, start, histogram_count(hist, start));
+			}
+			sep = OUTPUT_FIELD_SEPARATOR;
+		}
+		fprintf(hist_file, OUTPUT_RECORD_SEPARATOR);
+	}
+
+	fclose(hist_file);
+	for ( int i=0; i < num_fields; ++i ) {
+		if ( histograms[i] != NULL )
+			histogram_delete(histograms[i]);
+	}
+	free(histograms);
 }
 
 void write_avgs(struct hash_table *grouping, const char *category, struct hash_table *units) {
@@ -407,11 +468,14 @@ void write_avgs(struct hash_table *grouping, const char *category, struct hash_t
 				// Now we have a value, use it
 				fprintf(this_match_file, OUTPUT_FIELD_SEPARATOR "%g", value);
 				stat = hash_table_lookup(stats, output_field);
-				stats_process(stat, value);
+				stats_insert(stat, value);
 			}
 			fprintf(this_match_file, OUTPUT_RECORD_SEPARATOR);
 		}
 		fclose(this_match_file);
+
+		// Print histogram
+		write_histograms_file(stats, split_key, category);
 
 		// Print results
 		list_first_item(cmdline.output_fields);
