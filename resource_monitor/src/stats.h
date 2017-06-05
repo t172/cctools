@@ -62,7 +62,7 @@ double stats_whisker_high(struct stats *s);
 // to it, which must be deleted with histogram_delete().  Outliers
 // (<whisker_low and >whisker_high) will be discarded if
 // discard_outliers is non-zero.
-struct histogram *stats_build_histogram(struct stats *s, enum outlier_handling h);
+struct histogram *stats_build_histogram(struct stats *s, double bucket_size, enum outlier_handling h);
 
 #endif
 //EOF

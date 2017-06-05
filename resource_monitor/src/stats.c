@@ -156,7 +156,7 @@ double stats_whisker_high(struct stats *s) {
 	return highest;
 }
 
-struct histogram *stats_build_histogram(struct stats *s, enum outlier_handling h) {
+struct histogram *stats_build_histogram(struct stats *s, double bucket_size, enum outlier_handling h) {
 	if ( s->count == 0 )
 		return NULL;
 
@@ -176,8 +176,8 @@ struct histogram *stats_build_histogram(struct stats *s, enum outlier_handling h
 		high += high/1e6;
 	}
 
-	// Traditionally we want sqrt(n) buckets for n values
-	double bucket_size = fabs((high - low)/((int)sqrt(s->count)));
+	/* // Traditionally we want sqrt(n) buckets for n values */
+	/* double bucket_size = fabs((high - low)/((int)sqrt(s->count))); */
 	struct histogram *hist = histogram_create(bucket_size);
 
 	// Throw values into histogram
