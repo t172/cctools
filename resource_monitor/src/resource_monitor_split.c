@@ -866,8 +866,6 @@ void query_database_for_list(const char *db_file, struct list *list) {
 	struct record *item;
 	list_first_item(list);
 	while ( (item = list_next_item(list)) != NULL ) {
-		jx_pretty_print_stream(item->json, stdout);
-		
 		// Get task ID
 		int task_id;
 		struct jx *jx_value;
@@ -876,7 +874,6 @@ void query_database_for_list(const char *db_file, struct list *list) {
 		if ( jx_value->type == JX_INTEGER ) {
 			task_id = jx_value->u.integer_value; // Note: losing int64_t to int
 		} else if ( jx_value->type == JX_STRING ) {
-			printf("task_id = %s\n", jx_value->u.string_value);
 			task_id = atoi(jx_value->u.string_value);
 		} else {
 			continue;
@@ -894,9 +891,6 @@ void query_database_for_list(const char *db_file, struct list *list) {
 		item->work_units_total = sqlite3_column_int(res, 0);
 		item->work_units_processed = sqlite3_column_int(res, 1);
 		sqlite3_finalize(res);
-
-		printf("Task ID %d: %d/%d\n", task_id, item->work_units_processed, item->work_units_total);
-		exit(EXIT_SUCCESS);
 	}
 	sqlite3_close(db);
 }
