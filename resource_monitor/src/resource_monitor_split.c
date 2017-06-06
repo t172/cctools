@@ -6,12 +6,15 @@ See the file COPYING for details.
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <math.h>
+
+#include <sqlite3.h>
 
 #include "debug.h"
 #include "stringtools.h"
@@ -27,6 +30,9 @@ See the file COPYING for details.
 
 // What a category is called in the JSON summary data
 #define FIELD_CATEGORY "category"
+
+// What the task ID is called in the JSON summary data
+#define FIELD_TASK_ID "task_id"
 
 // How to separate fields in output (text) data files
 #define OUTPUT_FIELD_SEPARATOR " "
@@ -52,11 +58,12 @@ See the file COPYING for details.
 // are more than twice this amount, they will be culled)
 #define GNUPLOT_SOFTMAX_XLABELS 40
 
-#define CMDLINE_OPTS  "J:L:s:t:"
+#define CMDLINE_OPTS  "D:J:L:s:t:"
 #define OPT_JSON      'J'
 #define OPT_LIST      'L'
 #define OPT_SPLIT     's'
 #define OPT_THRESHOLD 't'
+#define OPT_DBFILE    'D'
 
 #define DEFAULT_SPLIT_FIELD "host"
 
@@ -67,6 +74,7 @@ static struct {
 	char *infile;
 	enum { INFILE_UNDEF, INFILE_LIST, INFILE_JSON	} infile_type;
 	char *output_dir;
+	char *db_file;
 	char *split_field;
 	int threshold;
 	struct list *output_fields;
@@ -74,6 +82,7 @@ static struct {
 	.infile = NULL,
 	.infile_type = INFILE_UNDEF,
 	.output_dir = ".",
+	.db_file = NULL,
 	.split_field = DEFAULT_SPLIT_FIELD,
 	.threshold = 1,
 	.output_fields = NULL
@@ -82,10 +91,20 @@ static struct {
 struct record {
 	char *filename;
 	struct jx *json;
+	int work_units_total;
+	int work_units_processed;
 };
 
 int string_compare(const void *a, const void *b) {
 	return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+// Creates a new record pointing to the given JSON, which must be
+// freed with record_delete().
+struct record *record_create(struct jx *j) {
+	struct record *r = xxcalloc(sizeof(*r), 1);
+	r->json = j;
+	return r;
 }
 
 void record_delete(struct record *r) {
@@ -100,6 +119,7 @@ void show_usage(char *cmd) {
 	fprintf(stderr, "  -%c <jsonfile>   read file with JSON-encoded summaries\n", OPT_JSON);
 	fprintf(stderr, "  -%c <listfile>   read file with list of summary pathnames\n", OPT_LIST);
 	fprintf(stderr, "\nOptions:\n");
+	fprintf(stderr, "  -%c <file>       use Lobster database <file> for more information\n", OPT_DBFILE);
 	fprintf(stderr, "  -%c <field>      split on <field> (default = \"%s\")\n", OPT_SPLIT, DEFAULT_SPLIT_FIELD);
 	fprintf(stderr, "  -%c <threshold>  set threshold to <threshold> matches\n", OPT_THRESHOLD);
 }
@@ -110,27 +130,30 @@ void process_cmdline(int argc, char *argv[]) {
 	while( (ch = getopt(argc, argv, CMDLINE_OPTS)) != -1 ) {
 		used_opts = 1;
 		switch ( ch )		{
-			case OPT_LIST:
-				cmdline.infile_type = INFILE_LIST;
-				cmdline.infile = optarg;
-				break;
-			case OPT_JSON:
-				cmdline.infile_type = INFILE_JSON;
-				cmdline.infile = optarg;
-				break;
-			case OPT_SPLIT:
-				cmdline.split_field = optarg;
-				break;
-			case OPT_THRESHOLD:
-				cmdline.threshold = atoi(optarg);
-				break;
-			default:
-				show_usage(argv[0]);
-				exit(EXIT_FAILURE);
-				break;
+		case OPT_LIST:
+			cmdline.infile_type = INFILE_LIST;
+			cmdline.infile = optarg;
+			break;
+		case OPT_JSON:
+			cmdline.infile_type = INFILE_JSON;
+			cmdline.infile = optarg;
+			break;
+		case OPT_SPLIT:
+			cmdline.split_field = optarg;
+			break;
+		case OPT_THRESHOLD:
+			cmdline.threshold = atoi(optarg);
+			break;
+		case OPT_DBFILE:
+			cmdline.db_file = optarg;
+			break;
+		default:
+			show_usage(argv[0]);
+			exit(EXIT_FAILURE);
+			break;
 		}
 	}
-
+	
 	// Output directory must be given
 	cmdline.output_dir = argv[optind];
 	if ( argc - optind < 1 ) {
@@ -187,9 +210,8 @@ void read_listfile(const char *listfile, struct list *dst) {
 			continue;
 		}
 
-		struct record *item = xxmalloc(sizeof(*item));
+		struct record *item = record_create(json);
 		item->filename = xxstrdup(filename);
-		item->json = json;
 
 		list_push_tail(dst, item);
 		summaries_read++;
@@ -223,9 +245,7 @@ void read_jsonfile(const char *jsonfile, struct list *dst) {
 				continue;
 			}
 		}
-		struct record *new_record = xxmalloc(sizeof(*new_record));
-		new_record->filename = NULL;
-		new_record->json = json;
+		struct record *new_record = record_create(json);
 		list_push_tail(dst, new_record);
 		count++;
 	}
@@ -333,7 +353,7 @@ static int get_json_value(struct record *item, const char *field, struct hash_ta
 		*dst = jx_value->u.integer_value;
 		return 1;
 	}
-	return 0;
+	return 0; // failure
 }
 
 // Opens an output file with the given name in a subdirectory created
@@ -835,6 +855,52 @@ void plot_category(struct hash_table *grouping, const char *category, struct has
 	/* } */
 }
 
+// Queries the database in db_file for the number of work units for
+// tasks in a given list of records.
+void query_database_for_list(const char *db_file, struct list *list) {
+	sqlite3 *db;
+	if ( sqlite3_open(db_file, &db) != SQLITE_OK )
+		fatal("Cannot open database \"%s\": %s", db_file, sqlite3_errmsg(db));
+	const char *sql_query = "SELECT units, units_processed FROM tasks WHERE id=?";
+
+	struct record *item;
+	list_first_item(list);
+	while ( (item = list_next_item(list)) != NULL ) {
+		jx_pretty_print_stream(item->json, stdout);
+		
+		// Get task ID
+		int task_id;
+		struct jx *jx_value;
+		if ( (jx_value = jx_lookup(item->json, FIELD_TASK_ID)) == NULL )
+			continue;
+		if ( jx_value->type == JX_INTEGER ) {
+			task_id = jx_value->u.integer_value; // Note: losing int64_t to int
+		} else if ( jx_value->type == JX_STRING ) {
+			printf("task_id = %s\n", jx_value->u.string_value);
+			task_id = atoi(jx_value->u.string_value);
+		} else {
+			continue;
+		}
+
+		// Query database
+		sqlite3_stmt *res;
+		if ( sqlite3_prepare_v2(db, sql_query, -1, &res, 0) != SQLITE_OK )
+			fatal("SQL error: %s", sqlite3_errmsg(db));
+		sqlite3_bind_int(res, 1, task_id);
+		if ( sqlite3_step(res) != SQLITE_ROW )
+			continue;
+
+		// Note: Using only first row if multiple rows
+		item->work_units_total = sqlite3_column_int(res, 0);
+		item->work_units_processed = sqlite3_column_int(res, 1);
+		sqlite3_finalize(res);
+
+		printf("Task ID %d: %d/%d\n", task_id, item->work_units_processed, item->work_units_total);
+		exit(EXIT_SUCCESS);
+	}
+	sqlite3_close(db);
+}
+
 int main(int argc, char *argv[]) {
 	debug_config(argv[0]);
 	process_cmdline(argc, argv);
@@ -860,12 +926,21 @@ int main(int argc, char *argv[]) {
 	struct list *list_in_category;
 	hash_table_firstkey(grouped_by_category);
 	while ( hash_table_nextkey(grouped_by_category, &category, (void **)&list_in_category) ) {
+		// Split category on user's split_field
 		printf("Subdividing category \"%s\"...\n", category);
 		struct hash_table *split_category = group_by_field(list_in_category, cmdline.split_field);
 		filter_by_threshold(split_category, cmdline.threshold);
-
-		// Keep track of units encountered
 		struct hash_table *units = hash_table_create(0, 0);
+
+		// Query Lobster database to get more information
+		struct list *split_list;
+		char *split_field;
+		if ( cmdline.db_file != NULL ) {
+			hash_table_firstkey(split_category);
+			while ( hash_table_nextkey(split_category, &split_field, (void **)&split_list) ) {
+				query_database_for_list(cmdline.db_file, split_list);
+			}
+		}
 
 		// Calculate statistics, write output files, and plot
 		write_avgs(split_category, category, units);
@@ -878,8 +953,6 @@ int main(int argc, char *argv[]) {
 			free(unit_str);
 		hash_table_delete(units);
 
-		struct list *split_list;
-		char *split_field;
 		hash_table_firstkey(split_category);
 		while ( hash_table_nextkey(split_category, &split_field, (void **)&split_list) ) {
 			list_delete(split_list);
