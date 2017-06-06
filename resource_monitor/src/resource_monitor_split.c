@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2015- The University of Notre Dame
+Copyright (C) 2017- The University of Notre Dame
 This software is distributed under the GNU General Public License.
 See the file COPYING for details.
 */
@@ -509,7 +509,13 @@ void write_avgs(struct hash_table *grouping, const char *category, struct hash_t
 	while ( (output_field = list_next_item(cmdline.output_fields)) != 0 ) {
 		struct stats *stat = hash_table_lookup(all_stats, output_field);
 		double *bucket_size = xxmalloc(sizeof(*bucket_size));
-		*bucket_size = fabs(stats_maximum(stat) - stats_minimum(stat))/((int)sqrt(stat->count));
+
+		// Traditionally want sqrt(n) buckets for n samples
+		double max = fabs(stats_maximum(stat));
+		double min = fabs(stats_minimum(stat));
+		if ( max == min )
+			max += max/1e6;
+		*bucket_size = (max - min)/((int)sqrt(stat->count));
 		hash_table_insert(bucket_sizes, output_field, bucket_size);
 	}
 
@@ -529,6 +535,9 @@ void write_avgs(struct hash_table *grouping, const char *category, struct hash_t
 		// Iterate through items of split_list (records matching split_key)
 		list_first_item(split_list);
 		while ( (item = list_next_item(split_list)) != 0 ) {
+			// Work units for this task
+			fprintf(this_match_file,  "%d" OUTPUT_FIELD_SEPARATOR "%d", item->work_units_processed, item->work_units_total);
+
 			// Lookup value for each output field
 			list_first_item(cmdline.output_fields);
 			while ( (output_field = list_next_item(cmdline.output_fields)) != 0 ) {

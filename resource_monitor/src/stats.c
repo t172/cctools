@@ -170,11 +170,11 @@ struct histogram *stats_build_histogram(struct stats *s, double bucket_size, enu
 		high = stats_maximum(s);
 	}
 
-	// Zero range means all values are the same
-	if ( high == low ) {
-		// Make a (hopefully) negligible but non-zero range
-		high += high/1e6;
-	}
+	/* // Zero range means all values are the same */
+	/* if ( high == low ) { */
+	/* 	// Make a (hopefully) negligible but non-zero range */
+	/* 	high += high/1e6; */
+	/* } */
 
 	/* // Traditionally we want sqrt(n) buckets for n values */
 	/* double bucket_size = fabs((high - low)/((int)sqrt(s->count))); */
