@@ -47,6 +47,9 @@ See the file COPYING for details.
 // Name used for cumulative stats (used in filename)
 #define ALLSTATS_NAME "(all)"
 
+#define SUBDIR_DATA "data"
+#define SUBDIR_PLOT ""
+
 // Name of gnuplot binary
 #define GNUPLOT_BINARY "gnuplot"
 
@@ -303,14 +306,18 @@ void filter_by_threshold(struct hash_table *grouping, int threshold) {
 
 // Filename for a specific output field's data.  Returns a string that
 // must be freed.
-inline static char *outfield_filename(const char *outfield) {
-	return string_format("%s.dat", outfield);
+static char *outfield_filename(const char *outfield) {
+	return string_format( "%s.dat", outfield);
 }
 
 // Name of directory in which to place stuff for a specific category.
 // Returns a string that must be freed.
-inline static char *category_directory(const char *category) {
-	return string_format("%s/%s", cmdline.output_dir, category);
+static char *category_directory(const char *category, const char *subdir) {
+	if ( subdir == NULL || *subdir == '\0' ) {
+		return string_format("%s/%s", cmdline.output_dir, category);
+	} else {
+		return string_format("%s/%s/%s", cmdline.output_dir, category, subdir);
+	}
 }
 
 // Retrieves the value of the given field from a struct record's JSON,
@@ -358,8 +365,8 @@ static int get_json_value(struct record *item, const char *field, struct hash_ta
 
 // Opens an output file with the given name in a subdirectory created
 // for the given category.
-static FILE *open_category_file(const char *category, const char *filename) {
-	char *outdir = category_directory(category);
+static FILE *open_category_file(const char *category, const char *subdir, const char *filename) {
+	char *outdir = category_directory(category, subdir);
 	if ( !create_dir(outdir, 0755) )
 		fatal("Cannot create output directory \"%s\"", outdir);
 
@@ -374,7 +381,7 @@ static FILE *open_category_file(const char *category, const char *filename) {
 
 static void write_histograms_file(struct hash_table *stats_table, struct hash_table *bucket_sizes, const char *split_key, const char *category) {
 	char *hist_filename = string_format("%s.hist", split_key);
-	FILE *hist_file = open_category_file(category, hist_filename);
+	FILE *hist_file = open_category_file(category, SUBDIR_DATA, hist_filename);
 	free(hist_filename);
 	fprintf(hist_file, "#");
 
@@ -428,7 +435,7 @@ static void write_histograms_file(struct hash_table *stats_table, struct hash_ta
 	free(histograms);
 }
 
-void write_avgs(struct hash_table *grouping, const char *category, struct hash_table *units) {
+void write_avgs(struct hash_table *grouping, const char *category, struct hash_table *units, struct hash_table **bucket_sizes) {
 	// Find ways to give up
 	if ( hash_table_size(grouping) == 0 )
 		return;
@@ -455,7 +462,7 @@ void write_avgs(struct hash_table *grouping, const char *category, struct hash_t
 	while ( (output_field = list_next_item(cmdline.output_fields)) != 0 ) {
 		// Create a file for each output field
 		char *output_filename = outfield_filename(output_field);
-		FILE *outfile = open_category_file(category, output_filename);
+		FILE *outfile = open_category_file(category, SUBDIR_DATA, output_filename);
 		hash_table_insert(output_file, output_field, outfile);
 		free(output_filename);
 		fprintf(outfile, "#%s summaries mean stddev whisker_low Q1 median Q3 whisker_high\n", cmdline.split_field);
@@ -504,7 +511,7 @@ void write_avgs(struct hash_table *grouping, const char *category, struct hash_t
 	}
 
 	// Build hash table of common bucket sizes
-	struct hash_table *bucket_sizes = hash_table_create(0, 0);
+	*bucket_sizes = hash_table_create(0, 0);
 	list_first_item(cmdline.output_fields);
 	while ( (output_field = list_next_item(cmdline.output_fields)) != 0 ) {
 		struct stats *stat = hash_table_lookup(all_stats, output_field);
@@ -516,11 +523,11 @@ void write_avgs(struct hash_table *grouping, const char *category, struct hash_t
 		if ( max == min )
 			max += max/1e6;
 		*bucket_size = (max - min)/((int)sqrt(stat->count));
-		hash_table_insert(bucket_sizes, output_field, bucket_size);
+		hash_table_insert(*bucket_sizes, output_field, bucket_size);
 	}
 
 	// Print cumulative histogram of all stats
-	write_histograms_file(all_stats, bucket_sizes, ALLSTATS_NAME, category);
+	write_histograms_file(all_stats, *bucket_sizes, ALLSTATS_NAME, category);
 
 	// Iterate through split keys in sorted order
 	for ( index = 0; index < num_splits; ++index ) {
@@ -529,7 +536,7 @@ void write_avgs(struct hash_table *grouping, const char *category, struct hash_t
 
 		// Dump values read into a file
 		char *this_filename = string_format("%s.dat", split_key);
-		FILE *this_match_file = open_category_file(category, this_filename);
+		FILE *this_match_file = open_category_file(category, SUBDIR_DATA, this_filename);
 		free(this_filename);
 
 		// Iterate through items of split_list (records matching split_key)
@@ -549,17 +556,13 @@ void write_avgs(struct hash_table *grouping, const char *category, struct hash_t
 				// Insert to this split_list's stats
 				stat = hash_table_lookup(stats, output_field);
 				stats_insert(stat, value);
-
-				/* // Insert to all stats */
-				/* stat = hash_table_lookup(all_stats, output_field); */
-				/* stats_insert(stat, value); */
 			}
 			fprintf(this_match_file, OUTPUT_RECORD_SEPARATOR);
 		}
 		fclose(this_match_file);
 
 		// Print histogram
-		write_histograms_file(stats, bucket_sizes, split_key, category);
+		write_histograms_file(stats, *bucket_sizes, split_key, category);
 
 		// Print results
 		list_first_item(cmdline.output_fields);
@@ -586,9 +589,6 @@ void write_avgs(struct hash_table *grouping, const char *category, struct hash_t
 			fprintf(outfile, OUTPUT_RECORD_SEPARATOR);
 		}
 	}  // each split_key
-
-	/* // Print cumulative histogram of all stats */
-	/* write_histograms_file(all_stats, ALLSTATS_NAME, category); */
 
 	// Clean up
 	free(keys_sorted);
@@ -635,7 +635,9 @@ static char *presentation_string(const char *s) {
 void plotscript_boxplot_outfield(FILE *f, const char *outfield, struct hash_table *units) {
 	char *pretty_outfield = presentation_string(outfield);
 	char *pretty_splitfield = presentation_string(cmdline.split_field);
-	char *data_filename = outfield_filename(outfield);
+	char *basename = outfield_filename(outfield);
+	char *data_filename = string_format("%s%s%s", SUBDIR_DATA, SUBDIR_DATA[0] != '\0' ? "/" : "", basename);
+	free(basename);
 
 	fprintf(f, "\n# %s\n", outfield);
 	fprintf(f, "set output '%s-boxplot.png'\n", outfield);
@@ -697,7 +699,7 @@ int write_plotscript_boxplot(struct hash_table *grouping, const char *category, 
 		num_summaries += list_size(split_list);
 	}
 
-	FILE *gnuplot_script = open_category_file(category, GNUPLOT_BOXPLOT_FILENAME);
+	FILE *gnuplot_script = open_category_file(category, SUBDIR_PLOT, GNUPLOT_BOXPLOT_FILENAME);
 	fprintf(gnuplot_script, "set terminal pngcairo enhanced color size 1072,768\n");
 	fprintf(gnuplot_script, "set key off\n");
 	fprintf(gnuplot_script, "set xtics nomirror rotate by 60 right\n");
@@ -718,21 +720,27 @@ int write_plotscript_boxplot(struct hash_table *grouping, const char *category, 
 }
 
 // Writes the gnuplot script for one specific output field
-void plotscript_histogram_outfield(FILE *f, const char *outfield, int col, struct hash_table *units) {
+void plotscript_histogram_outfield(FILE *f, const char *outfield, int col, struct hash_table *units, struct hash_table *bucket_sizes) {
 	char *pretty_outfield = presentation_string(outfield);
 	char *pretty_splitfield = presentation_string(cmdline.split_field);
-	char *data_filename = outfield_filename(outfield);
+	char *basename = outfield_filename(outfield);
+	char *data_filename = string_format("%s%s%s", SUBDIR_DATA, SUBDIR_DATA[0] != '\0' ? "/" : "", basename);
+	free(basename);
+	/* char *data_filename = outfield_filename(outfield); */
+
+	double *bucket_size = hash_table_lookup(bucket_sizes, outfield);
 
 	fprintf(f, "\n# %s\n", outfield);
 	fprintf(f, "set output '%s-hist.png'\n", outfield);
-	fprintf(f, "splits = system(\"sed '1d;s/ .*$//' '%s.dat'\")\n", outfield);
-	fprintf(f, "set multiplot layout 2,1 title '{/=16 %s vs. %s'.title_suffix.'}'\n", pretty_outfield, pretty_splitfield);
-	fprintf(f, "tweak(file) = sprintf(\"<awk '$%1$d==\\\"NAN\\\"{next}NR==2{x=$%1$d;y=0}NR>=2{print ($%1$d+x)/2,y;print $%1$d,(y+$%2$d)/2;x=$%1$d;y=$%2$d}END{print x,0}' '%%s'\", file)\n", col, col+1);
+	fprintf(f, "splits = system(\"sed '1d;s/ .*$//' '%s%s%s.dat'\")\n", SUBDIR_DATA, (SUBDIR_DATA[0] != '\0' ? "/" : ""), outfield);
+	fprintf(f, "set multiplot layout 2,1 title '{/=28 %s vs. %s'.title_suffix.'}'\n", pretty_outfield, pretty_splitfield);
+	//fprintf(f, "tweak(file) = sprintf(\"<awk '$%1$d==\\\"NAN\\\"{next}NR==2{x=$%1$d;y=0}NR>=2{print ($%1$d+x)/2,y;print $%1$d,(y+$%2$d)/2;x=$%1$d;y=$%2$d}END{print x,0}' '%%s'\", file)\n", col, col+1);
+	fprintf(f, "tweak(file) = sprintf(\"<awk '$%1$d==\\\"NAN\\\"{next}NR==2{x=$%1$d-%3$g;y=0}NR>=2{for(;x+%4$g<$%1$d;x+=%3$g){print x,y;y=0}print $%1$d,$%2$d;x=$%1$d+%3$g;y=$%2$d}END{print x,0}' '%%s'\", file)\n", col, col+1, *bucket_size, 0.5*(*bucket_size));
 	fprintf(f, "yscale = 1\n");
 
 	// Reduce the number of xtic labels
-	fprintf(f, "xskip = 1; n = system(\"wc -l %s\")\n", data_filename);
-	fprintf(f, "if (n > " TO_STR(GNUPLOT_SOFTMAX_XLABELS) ") xskip = int(n/" TO_STR(GNUPLOT_SOFTMAX_XLABELS) ")\n");
+	fprintf(f, "yskip = 1; n = system(\"wc -l %s\")\n", data_filename);
+	fprintf(f, "if (n > " TO_STR(GNUPLOT_SOFTMAX_XLABELS) ") yskip = int(n/" TO_STR(GNUPLOT_SOFTMAX_XLABELS) ")\n");
 
 	// Determine unit of measure
 	char *unit = hash_table_lookup(units, outfield);
@@ -752,9 +760,10 @@ void plotscript_histogram_outfield(FILE *f, const char *outfield, int col, struc
 	fprintf(f, "unset xlabel\n");
 	fprintf(f, "unset ytics\n");
 	fprintf(f, "set format x ''\n");
-	fprintf(f, "set ylabel 'All %ss'\n", pretty_splitfield);
+	fprintf(f, "set ylabel 'All %ss' font ',20'\n", pretty_splitfield);
 	fprintf(f, "set yrange [0:]\n");
-	fprintf(f, "plot tweak('" ALLSTATS_NAME ".hist') using ($1%s):(yscale*$2) with filledcurves ls 2 notitle\n\n", gnuplot_unit_conversion);
+	fprintf(f, "plot tweak('%s%s" ALLSTATS_NAME ".hist') using ($1%s):(yscale*$2) with filledcurves ls 2 notitle\n\n",
+					SUBDIR_DATA, (SUBDIR_DATA[0] != '\0' ? "/" : ""), gnuplot_unit_conversion);
 	fprintf(f, "set size 1,0.7\n");
 	fprintf(f, "set origin 0,0\n");
 	fprintf(f, "set bmargin 3.5\n");
@@ -762,7 +771,7 @@ void plotscript_histogram_outfield(FILE *f, const char *outfield, int col, struc
 	fprintf(f, "set format x '%%g'\n");
 
 	// Output field with unit
-	fprintf(f, "set xlabel '{/=14 %s", pretty_outfield);
+	fprintf(f, "set xlabel '{/=20 %s", pretty_outfield);
 	if ( unit != NULL ) {
 		fprintf(f, " (%s)", unit);
 	}
@@ -773,11 +782,12 @@ void plotscript_histogram_outfield(FILE *f, const char *outfield, int col, struc
 	fprintf(f, "set format y ''\n");
 	fprintf(f, "do for [i=1:(words(splits))] {\n");
 	fprintf(f, "  lbl = system(\"echo \".word(splits, i).\" | sed 's/\\.crc\\.nd\\.edu//;s/\\.nd\\.edu//'\")\n");
-	fprintf(f, "  if ( i %% 9 == 0 ) { set ytics add ( (lbl) (-vspread*i) ) }\n");
+	fprintf(f, "  if ( i %% yskip == 0 ) { set ytics add ( (lbl) (-vspread*i) ) }\n");
 	fprintf(f, "}\n");
-	fprintf(f, "set ytics font \",9\"\n");
+	fprintf(f, "set ytics font \",12\"\n");
 	fprintf(f, "set yrange [-vspread*(1.05*words(splits)):]\n");
-	fprintf(f, "plot for [i=1:(words(splits))] (tweak(word(splits, i).'.hist')) using ($1%s):(yscale*$2 - vspread*i) with filledcurves ls 1 notitle\n\n", gnuplot_unit_conversion);
+	fprintf(f, "plot for [i=1:(words(splits))] (tweak('%s%s'.word(splits, i).'.hist')) using ($1%s):(yscale*$2 - vspread*i) with filledcurves ls 1 notitle\n\n",
+					SUBDIR_DATA, (SUBDIR_DATA[0] != '\0' ? "/" : ""), gnuplot_unit_conversion);
 	fprintf(f, "unset multiplot\n");
 
 	free(pretty_outfield);
@@ -785,7 +795,7 @@ void plotscript_histogram_outfield(FILE *f, const char *outfield, int col, struc
 	free(data_filename);
 }
 
-int write_plotscript_histogram(struct hash_table *grouping, const char *category, struct hash_table *units) {
+int write_plotscript_histogram(struct hash_table *grouping, const char *category, struct hash_table *units, struct hash_table *bucket_sizes) {
 	// Find ways to give up
 	if ( hash_table_size(grouping) == 0 )
 		return 0;
@@ -807,10 +817,10 @@ int write_plotscript_histogram(struct hash_table *grouping, const char *category
 		num_summaries += list_size(split_list);
 	}
 
-	FILE *gnuplot_script = open_category_file(category, GNUPLOT_HISTOGRAM_FILENAME);
-	fprintf(gnuplot_script, "set terminal pngcairo enhanced size 640,1024\n");
+	FILE *gnuplot_script = open_category_file(category, SUBDIR_PLOT, GNUPLOT_HISTOGRAM_FILENAME);
+	fprintf(gnuplot_script, "set terminal pngcairo enhanced size 1280,2048\n");//640,1024
 	fprintf(gnuplot_script, "set key off\n");
-	fprintf(gnuplot_script, "set style line 1 lc rgb 'grey80'\n");
+	fprintf(gnuplot_script, "set style line 1 lc rgb 'grey90'\n");
 	fprintf(gnuplot_script, "set style line 2 lc rgb 'black'\n");
 	fprintf(gnuplot_script, "set style fill transparent solid 0.9 border lc rgb 'black'\n");
 	fprintf(gnuplot_script, "title_suffix = '    (%ld \"%s\" Summaries)'\n", num_summaries, category);
@@ -818,19 +828,20 @@ int write_plotscript_histogram(struct hash_table *grouping, const char *category
 	fprintf(gnuplot_script, "set lmargin at screen 0.18\n");
 	fprintf(gnuplot_script, "set grid xtics\n");
 	fprintf(gnuplot_script, "set grid\n");
+	fprintf(gnuplot_script, "set xtics font ',20'\n");
 
 	char *output_field;
 	list_first_item(cmdline.output_fields);
 	for ( int col=1; (output_field = list_next_item(cmdline.output_fields)) != 0;	col += 2 ) {
-		plotscript_histogram_outfield(gnuplot_script, output_field, col, units);
+		plotscript_histogram_outfield(gnuplot_script, output_field, col, units, bucket_sizes);
 	}
 	return 1;
 }
 
-void plot_category(struct hash_table *grouping, const char *category, struct hash_table *units) {
+void plot_category(struct hash_table *grouping, const char *category, struct hash_table *units, struct hash_table *bucket_sizes) {
 	if ( !write_plotscript_boxplot(grouping, category, units) )
 		return;
-	if ( !write_plotscript_histogram(grouping, category, units) )
+	if ( !write_plotscript_histogram(grouping, category, units, bucket_sizes) )
 		return;
 
 	/* printf("Plotting category \"%s\"\n", category); */
@@ -840,7 +851,7 @@ void plot_category(struct hash_table *grouping, const char *category, struct has
 	/* 	fatal("Cannot fork process: %s", strerror(errno)); */
 	/* } else if ( pid > 0 ) { // child */
 	/* 	// Change to directory where category stuff goes */
-	/* 	char *dir = category_directory(category); */
+	/* 	char *dir = category_directory(category, ""); */
 	/* 	if ( chdir(dir) != 0 ) */
 	/* 		fatal("Cannot change directory to \"%s\".", dir); */
 	/* 	free(dir); */
@@ -946,11 +957,17 @@ int main(int argc, char *argv[]) {
 		}
 
 		// Calculate statistics, write output files, and plot
-		write_avgs(split_category, category, units);
-		plot_category(split_category, category, units);
+		struct hash_table *bucket_sizes;
+		write_avgs(split_category, category, units, &bucket_sizes);
+		plot_category(split_category, category, units, bucket_sizes);
 
 		// Free values from hash tables
 		char *output_field, *unit_str;
+		double *bucket_size;
+		hash_table_firstkey(bucket_sizes);
+		while ( hash_table_nextkey(bucket_sizes, &output_field, (void **)&bucket_size) != 0 )
+			free(bucket_size);
+
 		hash_table_firstkey(units);
 		while ( hash_table_nextkey(units, &output_field, (void **)&unit_str) != 0 )
 			free(unit_str);
