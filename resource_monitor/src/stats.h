@@ -23,6 +23,9 @@ enum outlier_handling {
 // Resets stats and initializes a values allocation
 void stats_init(struct stats *s);
 
+// Frees resources used by a stats object
+void stats_free(struct stats *s);
+
 // Resets stats to zero
 void stats_reset(struct stats *s);
 
@@ -63,6 +66,9 @@ double stats_whisker_high(struct stats *s);
 // (<whisker_low and >whisker_high) will be discarded if
 // discard_outliers is non-zero.
 struct histogram *stats_build_histogram(struct stats *s, double bucket_size, enum outlier_handling h);
+
+// Merges another stats object into cumulative
+void stats_merge(struct stats *cumulative, struct stats *another);
 
 #endif
 //EOF

@@ -40,6 +40,9 @@ See the file COPYING for details.
 // How to separate records in output (text) data files
 #define OUTPUT_RECORD_SEPARATOR "\n"
 
+// How to start a commented line in output (text) data files
+#define OUTPUT_COMMENT "#"
+
 // A numeric placeholder for (text) data files (not-a-number is
 // ignored by gnuplot and not plotted)
 #define OUTPUT_PLACEHOLDER "NAN"
@@ -80,7 +83,8 @@ static struct {
 	char *db_file;
 	char *split_field;
 	int threshold;
-	struct list *output_fields;
+	char **fields;
+	int num_fields;
 } cmdline = {
 	.infile = NULL,
 	.infile_type = INFILE_UNDEF,
@@ -88,7 +92,8 @@ static struct {
 	.db_file = NULL,
 	.split_field = DEFAULT_SPLIT_FIELD,
 	.threshold = 1,
-	.output_fields = NULL
+	.fields = NULL,
+	.num_fields = 0
 };
 
 struct record {
@@ -98,7 +103,7 @@ struct record {
 	int work_units_processed;
 };
 
-int string_compare(const void *a, const void *b) {
+static int string_compare(const void *a, const void *b) {
 	return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
@@ -181,13 +186,13 @@ void process_cmdline(int argc, char *argv[]) {
 	}
 
 	// Default output fields
-	if ( cmdline.output_fields == NULL ) {
-		cmdline.output_fields = list_create();
-		list_push_tail(cmdline.output_fields, xxstrdup("wall_time"));
-		list_push_tail(cmdline.output_fields, xxstrdup("cpu_time"));
-		list_push_tail(cmdline.output_fields, xxstrdup("memory"));
-		//list_push_tail(cmdline.output_fields, xxstrdup("virtual_memory"));
-		list_push_tail(cmdline.output_fields, xxstrdup("disk"));
+	if ( cmdline.fields == NULL ) {
+		cmdline.num_fields = 4;
+		cmdline.fields = xxmalloc(cmdline.num_fields*sizeof(*cmdline.fields));
+		cmdline.fields[0] = xxstrdup("wall_time");
+		cmdline.fields[1] = xxstrdup("cpu_time");
+		cmdline.fields[2] = xxstrdup("memory");
+		cmdline.fields[3] = xxstrdup("disk");
 	}
 }
 
@@ -323,7 +328,7 @@ static char *category_directory(const char *category, const char *subdir) {
 // Retrieves the value of the given field from a struct record's JSON,
 // writing the value as a double to dst.  On error, returns zero and
 // nothing is written to dst.
-static int get_json_value(struct record *item, const char *field, struct hash_table *units, double *dst) {
+static int get_json_value(struct record *item, const char *field, struct hash_table *units_of_measure, double *dst) {
 	static int warned_inconsistent_units = 0;
 	struct jx *jx_value = jx_lookup(item->json, field);
 	if ( jx_value == NULL )
@@ -332,12 +337,12 @@ static int get_json_value(struct record *item, const char *field, struct hash_ta
 	struct jx *jx_unit;
 	if ( jx_value->type == JX_ARRAY ) {
 		// Keep track of the unit of measure
-		if ( units != NULL ) {
+		if ( units_of_measure != NULL ) {
 			jx_unit = jx_array_index(jx_value, 1);
 			if ( jx_unit != NULL && jx_unit->type == JX_STRING ) {
-				char *previous_unit = hash_table_lookup(units, field);
+				char *previous_unit = hash_table_lookup(units_of_measure, field);
 				if ( previous_unit == NULL ) {
-					hash_table_insert(units, field, xxstrdup(jx_unit->u.string_value));
+					hash_table_insert(units_of_measure, field, xxstrdup(jx_unit->u.string_value));
 				} else {
 					if ( strcmp(previous_unit, jx_unit->u.string_value) != 0 && !warned_inconsistent_units ) {
 						warn(D_RMON, "Encountered inconsistent units for \"%s\": \"%s\" and \"%s\".",
@@ -380,14 +385,14 @@ static FILE *open_category_file(const char *category, const char *subdir, const 
 }
 
 static void write_histograms_file(struct hash_table *stats_table, struct hash_table *bucket_sizes, const char *split_key, const char *category) {
-	char *hist_filename = string_format("%s.hist", split_key);
-	FILE *hist_file = open_category_file(category, SUBDIR_DATA, hist_filename);
-	free(hist_filename);
-	fprintf(hist_file, "#");
+//static void write_histograms_file(FILE *out, struct stats *stat, double bucket_size) {
+	char *filename = string_format("%s.hist", split_key);
+	FILE *out = open_category_file(category, SUBDIR_DATA, filename);
+	free(filename);
 
-	const int num_fields = list_size(cmdline.output_fields);
-	struct histogram **histograms = xxmalloc(num_fields*sizeof(*histograms));
-	double **buckets = xxmalloc(num_fields*sizeof(*buckets));
+	fprintf(out, OUTPUT_COMMENT);
+	struct histogram **histograms = xxmalloc(cmdline.num_fields*sizeof(*histograms));
+	double **buckets = xxmalloc(cmdline.num_fields*sizeof(*buckets));
 	int max_histsize = 0;
 
 	// Build histograms
@@ -435,7 +440,33 @@ static void write_histograms_file(struct hash_table *stats_table, struct hash_ta
 	free(histograms);
 }
 
-void write_avgs(struct hash_table *grouping, const char *category, struct hash_table *units, struct hash_table **bucket_sizes) {
+static double get_record_field(struct record *r, const char *field) {
+	double value;
+	if ( !get_json_value(r, field, NULL, &value) )
+		return NAN;
+	return value;
+}
+
+static double get_record_field_per_unit(struct record *r, const char *field) {
+	double value;
+	if ( !get_json_value(r, field, NULL, &value) )
+		return NAN;
+	return value / r->work_units_processed;
+}
+
+// Given a list of struct record, call the given function fn (blindly
+// passing arg as the second argument) with every record to retrieve a
+// value and insert it into stats s
+static void insert_record_list(struct stats *s, struct list *list, double (*fn)(struct record *, const char *), const char *field) {
+	struct record *item;
+	double value;
+	for ( list_first_item(list); (item = list_next_item(list)); ) {
+		value = (*fn)(item, field);
+		stats_insert(s, value);
+	}
+}
+
+void write_avgs_old(struct hash_table *grouping, const char *category, struct hash_table *units_of_measure, struct hash_table **bucket_sizes) {
 	// Find ways to give up
 	if ( hash_table_size(grouping) == 0 )
 		return;
@@ -448,9 +479,6 @@ void write_avgs(struct hash_table *grouping, const char *category, struct hash_t
 		return;
 	}
 
-	const char *output_field;
-	struct hash_table *output_file = hash_table_create(0, 0);
-
 	// Maintain stats for each split_list
 	struct stats *stat;
 	struct hash_table *stats = hash_table_create(0, 0);
@@ -458,15 +486,13 @@ void write_avgs(struct hash_table *grouping, const char *category, struct hash_t
 	// Maintain stats for all data
 	struct hash_table *all_stats = hash_table_create(0, 0);
 
+	// Table of FILE * to which to write output
+	struct hash_table *output_file = hash_table_create(0, 0);
+
+	// Initialize
+	const char *output_field;
 	list_first_item(cmdline.output_fields);
 	while ( (output_field = list_next_item(cmdline.output_fields)) != 0 ) {
-		// Create a file for each output field
-		char *output_filename = outfield_filename(output_field);
-		FILE *outfile = open_category_file(category, SUBDIR_DATA, output_filename);
-		hash_table_insert(output_file, output_field, outfile);
-		free(output_filename);
-		fprintf(outfile, "#%s summaries mean stddev whisker_low Q1 median Q3 whisker_high\n", cmdline.split_field);
-
 		// Start stats on each output field's values
 		stat = xxmalloc(sizeof(*stat));
 		stats_init(stat);
@@ -479,7 +505,7 @@ void write_avgs(struct hash_table *grouping, const char *category, struct hash_t
 	}
 
 	// Build array of matching split keys and sort them
-	int num_splits = hash_table_size(grouping);
+	const int num_splits = hash_table_size(grouping);
 	char **keys_sorted = xxmalloc(num_splits*sizeof(*keys_sorted));
 	struct hash_table *value_list;
 	char *split_key;
@@ -549,11 +575,11 @@ void write_avgs(struct hash_table *grouping, const char *category, struct hash_t
 			list_first_item(cmdline.output_fields);
 			while ( (output_field = list_next_item(cmdline.output_fields)) != 0 ) {
 				double value;
-				if ( !get_json_value(item, output_field, units, &value) )
+				if ( !get_json_value(item, output_field, units_of_measure, &value) )
 					continue;
 				fprintf(this_match_file, OUTPUT_FIELD_SEPARATOR "%g", value);
 
-				// Insert to this split_list's stats
+				// Insert into to this split_list's stats
 				stat = hash_table_lookup(stats, output_field);
 				stats_insert(stat, value);
 			}
@@ -568,7 +594,15 @@ void write_avgs(struct hash_table *grouping, const char *category, struct hash_t
 		list_first_item(cmdline.output_fields);
 		while ( (output_field = list_next_item(cmdline.output_fields)) != 0 ) {
 			// Each output field's aggregated data goes to a separate file
-			FILE *outfile = hash_table_lookup(output_file, output_field);
+			FILE *outfile;
+			if ( (outfile = hash_table_lookup(output_file, output_field)) == NULL ) {
+				// Create a file for each output field
+				char *output_filename = outfield_filename(output_field);
+				outfile = open_category_file(category, SUBDIR_DATA, output_filename);
+				hash_table_insert(output_file, output_field, outfile);
+				free(output_filename);
+				fprintf(outfile, "#%s summaries mean stddev whisker_low Q1 median Q3 whisker_high\n", cmdline.split_field);
+			}
 
 			// Print matching field (split_key) and number of matches
 			fprintf(outfile, "%s", split_key);
@@ -599,6 +633,91 @@ void write_avgs(struct hash_table *grouping, const char *category, struct hash_t
 	}
 	hash_table_delete(output_file);
 	hash_table_delete(stats);
+}
+
+// Dump the output field of every group to a separate file.  (For
+// example, if the cmdline.split_field is "host", write a file for
+// every host with one row per task and the columns are the output
+// fields.)  Also checks the units of measure of each output field.
+void write_dump_files(struct hash_table *grouping, const char *category, struct hash_table *units_of_measure) {
+	char *key;
+	hash_table_firstkey(grouping);
+	for ( struct list *group; hash_table_nextkey(grouping, &key, (void **)&group); ) {
+		char *filename = string_format("%s.dat", key);
+		FILE *out = open_category_file(category, SUBDIR_DATA, filename);
+		free(filename);
+
+		// Print commented first line describing columns
+		fprintf(out, OUTPUT_COMMENT "units_processed" OUTPUT_FIELD_SEPARATOR "units");
+		for ( int f=0; f<cmdline.num_fields; ++f )
+			fprintf(out, OUTPUT_FIELD_SEPARATOR "%s", cmdline.fields[f]);
+		fprintf(out, OUTPUT_RECORD_SEPARATOR);
+		
+		// One row for each matching item, with each field in a column
+		list_first_item(group);
+		for ( struct record *item; (item = list_next_item(group)) != NULL; ) {
+			// Work units
+			fprintf(out, "%d" OUTPUT_FIELD_SEPARATOR "%d", item->work_units_processed, item->work_units_total);
+
+			// Every desired output field
+			for ( int f=0; f<cmdline.num_fields; ++f ) {
+				double value;
+				if ( !get_json_value(item, cmdline.fields[f], units_of_measure, &value) )
+					value = NAN;
+				fprintf(out, OUTPUT_FIELD_SEPARATOR "%g", value);
+			}
+			fprintf(out, OUTPUT_RECORD_SEPARATOR);
+		}
+		fclose(out);
+	}
+}
+
+void write_avgs(struct hash_table *grouping, const char *category, double (*fn)(struct record *, const char *), const char *file_suffix, struct hash_table **bucket_sizes) {
+	if ( hash_table_size(grouping) == 0 )
+		return;  // ignore empty categories
+
+	// Build cumulative stats for each field
+	struct hash_table *stats_table = hash_table_create(0, 0);
+	struct stats *global_stats = xxmalloc(cmdline.num_fields*sizeof(*global_stats));
+	for ( int f=0; f<cmdline.num_fields; ++f ) {
+		char *field = cmdline.fields[f];
+		stats_init(&global_stats[f]);
+
+		// Read values
+		char *ignored;
+		hash_table_firstkey(grouping);
+		for ( struct hash_table *group; (hash_table_nextkey(grouping, &ignored, (void **)&group)) != NULL; ) {
+			list_first_item(group);
+			for ( struct record *item; (item = list_next_item(group)) != NULL; ) {
+				stats_insert(global_stats[f], (*fn)(item, field));
+			}
+		}
+		hash_table_insert(stats_table, field, &global_stats[f]);
+
+		// Calculate bucket size
+		double min = stats_minimum(global_stats[f]);
+		double max = stats_maximum(global_stats[f]);
+		if ( min == max )
+			max += max/1e6;
+		double bucket_size = (max - min)/((int)sqrt(global_stats[f]->count));
+		hash_table_insert(*bucket_sizes, field, bucket_size);
+	}
+
+	// Write cumulative histogram
+	write_histograms_file(stats_table, global_stats[f], *bucket_sizes);
+
+	// Build global_stats for min and max
+
+	// Calculate bucket sizes
+
+	// Print cumulative histogram
+
+	// Iterate through groups
+    // Write histogram to <split_key>.hist file
+
+	// Build array of groups and sort them
+	// Iterate through groups in sorted order
+    // Write line of stats averages to <output_field>.dat file
 }
 
 // Make a string pretty for formal presentation.  Returns a new string
@@ -632,7 +751,7 @@ static char *presentation_string(const char *s) {
 }
 
 // Writes the gnuplot script for one specific output field
-void plotscript_boxplot_outfield(FILE *f, const char *outfield, struct hash_table *units) {
+void plotscript_boxplot_outfield(FILE *f, const char *outfield, struct hash_table *units_of_measure) {
 	char *pretty_outfield = presentation_string(outfield);
 	char *pretty_splitfield = presentation_string(cmdline.split_field);
 	char *basename = outfield_filename(outfield);
@@ -648,7 +767,7 @@ void plotscript_boxplot_outfield(FILE *f, const char *outfield, struct hash_tabl
 	fprintf(f, "if (n > " TO_STR(GNUPLOT_SOFTMAX_XLABELS) ") xskip = int(n/" TO_STR(GNUPLOT_SOFTMAX_XLABELS) ")\n");
 
 	// Determine unit of measure
-	char *unit = hash_table_lookup(units, outfield);
+	char *unit = hash_table_lookup(units_of_measure, outfield);
 	char *gnuplot_unit_conversion = "";
 
 	// Convert seconds to hours
@@ -677,7 +796,7 @@ void plotscript_boxplot_outfield(FILE *f, const char *outfield, struct hash_tabl
 	free(data_filename);
 }
 
-int write_plotscript_boxplot(struct hash_table *grouping, const char *category, struct hash_table *units) {
+int write_plotscript_boxplot(struct hash_table *grouping, const char *category, struct hash_table *units_of_measure) {
 	// Find ways to give up
 	if ( hash_table_size(grouping) == 0 )
 		return 0;
@@ -714,13 +833,13 @@ int write_plotscript_boxplot(struct hash_table *grouping, const char *category, 
 	char *output_field;
 	list_first_item(cmdline.output_fields);
 	while ( (output_field = list_next_item(cmdline.output_fields)) != 0 ) {
-		plotscript_boxplot_outfield(gnuplot_script, output_field, units);
+		plotscript_boxplot_outfield(gnuplot_script, output_field, units_of_measure);
 	}
 	return 1;
 }
 
 // Writes the gnuplot script for one specific output field
-void plotscript_histogram_outfield(FILE *f, const char *outfield, int col, struct hash_table *units, struct hash_table *bucket_sizes) {
+void plotscript_histogram_outfield(FILE *f, const char *outfield, int col, struct hash_table *units_of_measure, struct hash_table *bucket_sizes) {
 	char *pretty_outfield = presentation_string(outfield);
 	char *pretty_splitfield = presentation_string(cmdline.split_field);
 	char *basename = outfield_filename(outfield);
@@ -743,7 +862,7 @@ void plotscript_histogram_outfield(FILE *f, const char *outfield, int col, struc
 	fprintf(f, "if (n > " TO_STR(GNUPLOT_SOFTMAX_XLABELS) ") yskip = int(n/" TO_STR(GNUPLOT_SOFTMAX_XLABELS) ")\n");
 
 	// Determine unit of measure
-	char *unit = hash_table_lookup(units, outfield);
+	char *unit = hash_table_lookup(units_of_measure, outfield);
 	char *gnuplot_unit_conversion = "";
 
 	// Convert seconds to hours
@@ -764,6 +883,8 @@ void plotscript_histogram_outfield(FILE *f, const char *outfield, int col, struc
 	fprintf(f, "set yrange [0:]\n");
 	fprintf(f, "plot tweak('%s%s" ALLSTATS_NAME ".hist') using ($1%s):(yscale*$2) with filledcurves ls 2 notitle\n\n",
 					SUBDIR_DATA, (SUBDIR_DATA[0] != '\0' ? "/" : ""), gnuplot_unit_conversion);
+
+	// Bottom plot (break down by split field)
 	fprintf(f, "set size 1,0.7\n");
 	fprintf(f, "set origin 0,0\n");
 	fprintf(f, "set bmargin 3.5\n");
@@ -776,8 +897,6 @@ void plotscript_histogram_outfield(FILE *f, const char *outfield, int col, struc
 		fprintf(f, " (%s)", unit);
 	}
 	fprintf(f, "}'\n");
-
-	// Bottom plot (break down by split field)
 	fprintf(f, "unset ylabel\n");
 	fprintf(f, "set format y ''\n");
 	fprintf(f, "do for [i=1:(words(splits))] {\n");
@@ -795,7 +914,7 @@ void plotscript_histogram_outfield(FILE *f, const char *outfield, int col, struc
 	free(data_filename);
 }
 
-int write_plotscript_histogram(struct hash_table *grouping, const char *category, struct hash_table *units, struct hash_table *bucket_sizes) {
+int write_plotscript_histogram(struct hash_table *grouping, const char *category, struct hash_table *units_of_measure, struct hash_table *bucket_sizes) {
 	// Find ways to give up
 	if ( hash_table_size(grouping) == 0 )
 		return 0;
@@ -833,15 +952,15 @@ int write_plotscript_histogram(struct hash_table *grouping, const char *category
 	char *output_field;
 	list_first_item(cmdline.output_fields);
 	for ( int col=1; (output_field = list_next_item(cmdline.output_fields)) != 0;	col += 2 ) {
-		plotscript_histogram_outfield(gnuplot_script, output_field, col, units, bucket_sizes);
+		plotscript_histogram_outfield(gnuplot_script, output_field, col, units_of_measure, bucket_sizes);
 	}
 	return 1;
 }
 
-void plot_category(struct hash_table *grouping, const char *category, struct hash_table *units, struct hash_table *bucket_sizes) {
-	if ( !write_plotscript_boxplot(grouping, category, units) )
+void plot_category(struct hash_table *grouping, const char *category, struct hash_table *units_of_measure, struct hash_table *bucket_sizes) {
+	if ( !write_plotscript_boxplot(grouping, category, units_of_measure) )
 		return;
-	if ( !write_plotscript_histogram(grouping, category, units, bucket_sizes) )
+	if ( !write_plotscript_histogram(grouping, category, units_of_measure, bucket_sizes) )
 		return;
 
 	/* printf("Plotting category \"%s\"\n", category); */
@@ -944,7 +1063,7 @@ int main(int argc, char *argv[]) {
 		printf("Subdividing category \"%s\"...\n", category);
 		struct hash_table *split_category = group_by_field(list_in_category, cmdline.split_field);
 		filter_by_threshold(split_category, cmdline.threshold);
-		struct hash_table *units = hash_table_create(0, 0);
+		struct hash_table *units_of_measure = hash_table_create(0, 0);
 
 		// Query Lobster database to get more information
 		struct list *split_list;
@@ -958,8 +1077,8 @@ int main(int argc, char *argv[]) {
 
 		// Calculate statistics, write output files, and plot
 		struct hash_table *bucket_sizes;
-		write_avgs(split_category, category, units, &bucket_sizes);
-		plot_category(split_category, category, units, bucket_sizes);
+		write_avgs(split_category, category, units_of_measure, &bucket_sizes);
+		plot_category(split_category, category, units_of_measure, bucket_sizes);
 
 		// Free values from hash tables
 		char *output_field, *unit_str;
@@ -968,10 +1087,10 @@ int main(int argc, char *argv[]) {
 		while ( hash_table_nextkey(bucket_sizes, &output_field, (void **)&bucket_size) != 0 )
 			free(bucket_size);
 
-		hash_table_firstkey(units);
-		while ( hash_table_nextkey(units, &output_field, (void **)&unit_str) != 0 )
+		hash_table_firstkey(units_of_measure);
+		while ( hash_table_nextkey(units_of_measure, &output_field, (void **)&unit_str) != 0 )
 			free(unit_str);
-		hash_table_delete(units);
+		hash_table_delete(units_of_measure);
 
 		hash_table_firstkey(split_category);
 		while ( hash_table_nextkey(split_category, &split_field, (void **)&split_list) ) {
