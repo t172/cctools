@@ -46,6 +46,10 @@ void stats_init(struct stats *s) {
 	s->values = xxmalloc(s->values_alloc*sizeof(*s->values));
 }
 
+void stats_free(struct stats *s) {
+	if ( s ) free(s->values);
+}
+
 void stats_reset(struct stats *s) {
 	s->sum = 0;
 	s->sum_squares = 0;
@@ -54,6 +58,8 @@ void stats_reset(struct stats *s) {
 }
 
 void stats_insert(struct stats *s, double value) {
+	if ( isnan(value) )
+		return;
 	s->sum += value;
 	s->sum_squares += value*value;
 	if ( s->count == (long)s->values_alloc )
@@ -170,17 +176,8 @@ struct histogram *stats_build_histogram(struct stats *s, double bucket_size, enu
 		high = stats_maximum(s);
 	}
 
-	/* // Zero range means all values are the same */
-	/* if ( high == low ) { */
-	/* 	// Make a (hopefully) negligible but non-zero range */
-	/* 	high += high/1e6; */
-	/* } */
-
-	/* // Traditionally we want sqrt(n) buckets for n values */
-	/* double bucket_size = fabs((high - low)/((int)sqrt(s->count))); */
-	struct histogram *hist = histogram_create(bucket_size);
-
 	// Throw values into histogram
+	struct histogram *hist = histogram_create(bucket_size);
 	if ( h == STATS_DISCARD_OUTLIERS ) {
 		double value;
 		for ( int i=0; i < s->count; ++i ) {
@@ -194,6 +191,20 @@ struct histogram *stats_build_histogram(struct stats *s, double bucket_size, enu
 		}
 	}
 	return hist;
+}
+
+double stats_ideal_bucket_size(struct stats *s) {
+	double max = fabs(stats_maximum(s));
+	double min = fabs(stats_minimum(s));
+	if ( max == min )
+		max += max/1e6;
+	return (max - min)/((int)sqrt(s->count));
+}
+
+void stats_merge(struct stats *cumulative, struct stats *another) {
+	for ( int i=0; i<another->count; ++i ) {
+		stats_insert(cumulative, another->values[i]);
+	}
 }
 
 //EOF
