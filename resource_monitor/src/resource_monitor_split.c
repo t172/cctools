@@ -77,12 +77,25 @@ See the file COPYING for details.
 #define TO_STR(x) TO_STR_EVAL(x)
 
 static struct {
+	// The input file name
 	char *infile;
+
+	// How to read the input file
 	enum { INFILE_UNDEF, INFILE_LIST, INFILE_JSON	} infile_type;
+
+	// The output directory (where to write stuff)
 	char *output_dir;
+
+	// A Lobster database file to read for more information (optional)
 	char *db_file;
+
+	// The field on which to split into groups (like an SQL "GROUP BY")
 	char *split_field;
+
+	// A group with less than this many summaries will be dropped
 	int threshold;
+
+	// The data fields to include in output
 	struct list *output_fields;
 } cmdline = {
 	.infile = NULL,
@@ -101,7 +114,7 @@ struct record {
 	int work_units_processed;
 };
 
-int string_compare(const void *a, const void *b) {
+static int string_compare(const void *a, const void *b) {
 	return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
@@ -127,7 +140,7 @@ void show_usage(char *cmd) {
 	fprintf(stderr, "\nOptions:\n");
 	fprintf(stderr, "  -%c <dbfile>     use Lobster database <dbfile> for more information\n", OPT_DBFILE);
 	fprintf(stderr, "  -%c <field>      split on <field> (default = \"%s\")\n", OPT_SPLIT, DEFAULT_SPLIT_FIELD);
-	fprintf(stderr, "  -%c <threshold>  set threshold to <threshold> matches\n", OPT_THRESHOLD);
+	fprintf(stderr, "  -%c <threshold>  ignore groups with less than <threshold> matches\n", OPT_THRESHOLD);
 }
 
 void process_cmdline(int argc, char *argv[]) {
@@ -499,9 +512,8 @@ void write_avgs(struct hash_table *grouping, const char *category, struct hash_t
 	qsort(keys_sorted, num_splits, sizeof(*keys_sorted), string_compare);
 
 	// First, iterate through all data to obtain min and max
-	for ( int group=0; group < num_splits; ++group ) {
-		split_key = keys_sorted[group];
-		split_list = hash_table_lookup(grouping, split_key);
+	for ( int group_num=0; group_num < num_splits; ++group_num ) {
+		struct list *split_list = hash_table_lookup(grouping, keys_sorted[group_num]);
 
 		list_first_item(split_list);
 		while ( (item = list_next_item(split_list)) != 0 ) {
@@ -639,7 +651,7 @@ static char *presentation_string(const char *s) {
 }
 
 // Writes the gnuplot script for one specific output field
-void plotscript_boxplot_outfield(FILE *f, const char *outfield, struct hash_table *units_of_measure) {
+static void plotscript_boxplot_outfield(FILE *f, const char *outfield, struct hash_table *units_of_measure) {
 	char *pretty_outfield = presentation_string(outfield);
 	char *pretty_splitfield = presentation_string(cmdline.split_field);
 	char *basename = string_format("%s.dat", outfield);
@@ -727,7 +739,7 @@ int write_plotscript_boxplot(struct hash_table *grouping, const char *category, 
 }
 
 // Writes the gnuplot script for one specific output field
-void plotscript_histogram_outfield(FILE *f, const char *outfield, int col, struct hash_table *units_of_measure, struct hash_table *bucket_sizes[2]) {
+static void plotscript_histogram_outfield(FILE *f, const char *outfield, int col, struct hash_table *units_of_measure, struct hash_table *bucket_sizes[2]) {
 	char *pretty_outfield = presentation_string(outfield);
 	char *pretty_splitfield = presentation_string(cmdline.split_field);
 	char *data_filename[2] = {
@@ -749,7 +761,7 @@ void plotscript_histogram_outfield(FILE *f, const char *outfield, int col, struc
 
 		fprintf(f, "\n# %s%s\n", outfield, i==1?" per work unit":"");
 		fprintf(f, "set output '%s%s-hist.png'\n", outfield, filename_suffix);
-		fprintf(f, "splits = system(\"sed '1d;s/ .*$//' '%s%s%s%s.dat'\")\n", SUBDIR_DATA, (SUBDIR_DATA[0] != '\0' ? "/" : ""), outfield, filename_suffix);
+		fprintf(f, "splits = system(\"sort -n -k 3 '%s%s%s%s.dat' | sed '1d;s/ .*$//'\")\n", SUBDIR_DATA, (SUBDIR_DATA[0] != '\0' ? "/" : ""), outfield, filename_suffix);
 		fprintf(f, "set multiplot layout 2,1 title '{/=28 %s%s vs. %s'.title_suffix.'}'\n",
 						pretty_outfield, i==1 ? " per Work Unit" : "", pretty_splitfield);
 		//fprintf(f, "tweak(file) = sprintf(\"<awk '$%1$d==\\\"NAN\\\"{next}NR==2{x=$%1$d;y=0}NR>=2{print ($%1$d+x)/2,y;print $%1$d,(y+$%2$d)/2;x=$%1$d;y=$%2$d}END{print x,0}' '%%s'\", file)\n", col, col+1);
