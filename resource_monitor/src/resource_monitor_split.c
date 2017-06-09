@@ -120,12 +120,12 @@ void record_delete(struct record *r) {
 }
 
 void show_usage(char *cmd) {
-	fprintf(stderr, "Usage:\n  %s [opts] (-%c <listfile> | -%c <jsonfile>) <outdir>\n", cmd, OPT_LIST, OPT_JSON);
+	fprintf(stderr, "Usage:\n  %s [opts] (-%c <jsonfile> | -%c <listfile>) <outdir>\n", cmd, OPT_JSON, OPT_LIST);
 	fprintf(stderr, "\nRequired: (one of the following)\n");
 	fprintf(stderr, "  -%c <jsonfile>   read file with JSON-encoded summaries\n", OPT_JSON);
 	fprintf(stderr, "  -%c <listfile>   read file with list of summary pathnames\n", OPT_LIST);
 	fprintf(stderr, "\nOptions:\n");
-	fprintf(stderr, "  -%c <file>       use Lobster database <file> for more information\n", OPT_DBFILE);
+	fprintf(stderr, "  -%c <dbfile>     use Lobster database <dbfile> for more information\n", OPT_DBFILE);
 	fprintf(stderr, "  -%c <field>      split on <field> (default = \"%s\")\n", OPT_SPLIT, DEFAULT_SPLIT_FIELD);
 	fprintf(stderr, "  -%c <threshold>  set threshold to <threshold> matches\n", OPT_THRESHOLD);
 }
@@ -211,7 +211,8 @@ void read_listfile(const char *listfile, struct list *dst) {
 
 		struct jx *json = jx_parse_file(filename);
 		if ( json == NULL ) {
-			// from jx_parse.h on jx_parse_file(): "If the parse fails or no JSON value is present, null is returned."
+			// from jx_parse.h on jx_parse_file(): "If the parse fails or no
+			// JSON value is present, null is returned."
 			skipped_summaries++;
 			continue;
 		}
@@ -306,12 +307,6 @@ void filter_by_threshold(struct hash_table *grouping, int threshold) {
 	if ( filtered_groups > 0 )
 		printf("Filtered out %d groups with fewer than %d matches.\n", filtered_groups, threshold);
 }
-
-/* // Filename for a specific output field's data.  Returns a string that */
-/* // must be freed. */
-/* static char *outfield_filename(const char *outfield) { */
-/* 	return string_format("%s.dat", outfield); */
-/* } */
 
 // Name of directory in which to place stuff for a specific category.
 // Returns a string that must be freed.

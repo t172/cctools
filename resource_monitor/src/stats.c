@@ -58,7 +58,7 @@ void stats_reset(struct stats *s) {
 }
 
 void stats_insert(struct stats *s, double value) {
-	if ( isnan(value) )
+	if ( isnan(value) || isinf(value) )
 		return;
 	s->sum += value;
 	s->sum_squares += value*value;
