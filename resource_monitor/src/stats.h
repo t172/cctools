@@ -16,27 +16,45 @@ struct stats {
 	int dirty;
 };
 
+// Two-dimensional stats, for regression, correlation, etc.
+struct stats2 {
+	double sum_x, sum_y;
+	double sum_xy;
+	double sum_squares_x, sum_squares_y;
+	double min_x, min_y;
+	double max_x, max_y;
+	long count;
+};
+
 enum outlier_handling {
 	STATS_KEEP_OUTLIERS, STATS_DISCARD_OUTLIERS
 };
 
 // Resets stats and initializes a values allocation
 void stats_init(struct stats *s);
+void stats2_init(struct stats2 *s);
 
 // Frees resources used by a stats object
 void stats_free(struct stats *s);
+void stats2_free(struct stats2 *s);
 
 // Resets stats to zero
 void stats_reset(struct stats *s);
+void stats2_reset(struct stats2 *s);
 
 // Processes a value (adds it to the calculations)
 void stats_insert(struct stats *s, double value);
+void stats2_insert(struct stats2 *s, double x, double y);
 
 // Calculates the mean of the processed values
 double stats_mean(struct stats *s);
+double stats2_mean_x(struct stats2 *s);
+double stats2_mean_y(struct stats2 *s);
 
 // Calculates the standard deviation of the processed values
 double stats_stddev(struct stats *s);
+double stats2_stddev_x(struct stats2 *s);
+double stats2_stddev_y(struct stats2 *s);
 
 // Returns the lowest of the processed values
 double stats_minimum(struct stats *s);
@@ -74,6 +92,17 @@ double stats_ideal_bucket_size(struct stats *s);
 
 // Merges another stats object into cumulative
 void stats_merge(struct stats *cumulative, struct stats *another);
+
+// Fits the line y = a*x + b to the data, returning non-zero if the
+// slope a was written to slope_dst and y-intercept b was written to
+// yint_dst.  A return of zero indicates an error (such as <2 points).
+int stats2_linear_regression(struct stats2 *s, double *slope_dst, double *yint_dst);
+
+// Covariance of x- and y-values.
+double stats2_covariance(struct stats2 *s);
+
+// Linear correlation
+double stats2_linear_correlation(struct stats2 *s);
 
 #endif
 //EOF
