@@ -496,7 +496,7 @@ void write_vs_units_plots(struct hash_table *grouping, const char *category, str
 
 	// Write data file header
 	FILE *out = open_category_file(category, SUBDIR_DATA, VSUNITS_NAME ".dat");
-	fprintf(out, OUTPUT_COMMENT "units_processed" OUTPUT_FIELD_SEPARATOR "units");
+	fprintf(out, OUTPUT_COMMENT "" FIELD_TASK_ID "" OUTPUT_FIELD_SEPARATOR "units_processed" OUTPUT_FIELD_SEPARATOR "units");
 	for ( int f=0; f < cmdline.num_fields; ++f ) {
 		fprintf(out, OUTPUT_FIELD_SEPARATOR "%s", cmdline.fields[f]);
 	}
@@ -520,7 +520,12 @@ void write_vs_units_plots(struct hash_table *grouping, const char *category, str
 	for ( struct list *record_list; hash_table_nextkey(grouping, &ignored_key, (void **)&record_list); ) {
 		list_first_item(record_list);
 		for ( struct record *item; (item = list_next_item(record_list)) != NULL; ) {
-			fprintf(out, "%d" OUTPUT_FIELD_SEPARATOR "%d", item->work_units_processed, item->work_units_total);
+			struct jx *task_id_jx;
+			const char *task_id = NULL;
+			if ( (task_id_jx = jx_lookup(item->json, FIELD_TASK_ID)) != NULL && task_id_jx->type == JX_STRING )
+				task_id = task_id_jx->u.string_value;
+			fprintf(out, "%s" OUTPUT_FIELD_SEPARATOR "%d" OUTPUT_FIELD_SEPARATOR "%d",
+							task_id, item->work_units_processed, item->work_units_total);
 			for ( int f=0; f < cmdline.num_fields; ++f ) {
 				double value;
 				if ( !get_json_value(item, cmdline.fields[f], NULL, &value) ) {
@@ -541,8 +546,8 @@ void write_vs_units_plots(struct hash_table *grouping, const char *category, str
 	fprintf(out, "set terminal pngcairo enhanced size 1024,768\n");
 	fprintf(out, "set tics font ',16'\n");
 	fprintf(out, "set style line 1 lc rgb 'gray20' pt 7\n");
-	fprintf(out, "set style line 2 lc rgb '#880000' lw 3\n");
-	fprintf(out, "set style fill transparent solid 0.2 noborder\n");
+	fprintf(out, "set style line 2 lc rgb '#880000' lw 4\n");
+	fprintf(out, "set style fill transparent solid 0.1 noborder\n");
 	fprintf(out, "unset key\n");
 	fprintf(out, "set yrange [0:]\n");
 	
@@ -551,12 +556,13 @@ void write_vs_units_plots(struct hash_table *grouping, const char *category, str
 		for ( int u=0; u < 2; ++u ) {
 			fprintf(out, "\n# %s vs. %s\n", pretty_field, display_string[u]);
 			fprintf(out, "set output '%s_vs_%s.png'\n", cmdline.fields[f], name_string[u]);
-			fprintf(out, "set title '%s vs. %s\t(%ld \"%s\" Summaries)' font ',24'\n",
+			fprintf(out, "set title '%s vs. %s  (%ld \"%s\" Summaries)' font ',22'\n",
 							pretty_field, display_string[u], stat[f][u].count, category);
 			fprintf(out, "set xlabel '%s' font ',20'\n", display_string[u]);
 			double left = stat[f][u].min_x - 0.01*(stat[f][u].max_x - stat[f][u].min_x);
 			fprintf(out, "set xrange [%g:%g]\n", left<0 ? left : 0, stat[f][u].max_x + 0.01*(stat[f][u].max_x - stat[f][u].min_x));
 			const char *unit_string = hash_table_lookup(units_of_measure, cmdline.fields[f]);
+			const char *original_unit = unit_string;
 			double unit_conversion = 1;
 			if ( strcmp(unit_string, "MB") == 0 ) {
 				// Convert MB to GB
@@ -583,13 +589,13 @@ void write_vs_units_plots(struct hash_table *grouping, const char *category, str
 			const int have_regression = stats2_linear_regression(&stat[f][u], &a, &b);
 			if ( have_regression ) {
 				fprintf(out, "set label 1 \"{/Oblique y} = (%2$g %1$s){/Oblique x} + (%3$g %1$s)\\n"
-								"correlation %4$f\" at screen 0.125,0.8 left font ',16'\n",
-								unit_string, a/unit_conversion, b/unit_conversion,	stats2_linear_correlation(&stat[f][u]));
+								"correlation %4$f\" at screen 0.52,0.17 left font ',18'\n",
+								original_unit, a, b,	stats2_linear_correlation(&stat[f][u]));
 			} else {
 				fprintf(out, "set label 1 \"\"\n");
 			}
 			fprintf(out, "plot '%s%s" VSUNITS_NAME ".dat'", SUBDIR_DATA, SUBDIR_DATA[0] != '\0' ? "/" : "");
-			fprintf(out, " using %d:(convert_unit($%d)) with circles ls 1 notitle", u+1, f+3);
+			fprintf(out, " using %d:(convert_unit($%d)) with circles ls 1 notitle", u+2, f+4);
 			if ( have_regression ) {
 				fprintf(out, ", \\\n\tconvert_unit(%g*x + %g) with lines ls 2 notitle\n", a, b);
 			} else {
