@@ -46,9 +46,15 @@ void stats_init(struct stats *s) {
 	s->values = xxmalloc(s->values_alloc*sizeof(*s->values));
 }
 
+void stats2_init(struct stats2 *s) {
+	stats2_reset(s);
+}
+
 void stats_free(struct stats *s) {
 	if ( s ) free(s->values);
 }
+
+void stats2_free(struct stats2 *s) {}
 
 void stats_reset(struct stats *s) {
 	s->sum = 0;
@@ -57,8 +63,14 @@ void stats_reset(struct stats *s) {
 	s->dirty = 0;
 }
 
+void stats2_reset(struct stats2 *s) {
+	memset(s, 0, sizeof(*s));
+	s->min_x = s->min_y = INFINITY;
+	s->max_x = s->max_y = -INFINITY;
+}
+
 void stats_insert(struct stats *s, double value) {
-	if ( isnan(value) )
+	if ( isnan(value) || isinf(value) )
 		return;
 	s->sum += value;
 	s->sum_squares += value*value;
@@ -68,13 +80,46 @@ void stats_insert(struct stats *s, double value) {
 	s->dirty = 1;
 }
 
+void stats2_insert(struct stats2 *s, double x, double y) {
+	if ( isnan(x) || isnan(y) || isinf(x) || isinf(y) )
+		return;
+	s->sum_x += x;
+	s->sum_y += y;
+	s->sum_xy += x*y;
+	s->sum_squares_x += x*x;
+	s->sum_squares_y += y*y;
+	if ( s->min_x > x ) s->min_x = x;
+	if ( s->min_y > y ) s->min_y = y;
+	if ( s->max_x < x ) s->max_x = x;
+	if ( s->max_y < y ) s->max_y = y;
+	s->count++;
+}
+
 double stats_mean(struct stats *s) {
 	return s->sum / s->count;
 }
 
+double stats2_mean_x(struct stats2 *s) {
+	return s->sum_x / s->count;
+}
+
+double stats2_mean_y(struct stats2 *s) {
+	return s->sum_y / s->count;
+}
+
 double stats_stddev(struct stats *s) {
-	double mean = stats_mean(s);
+	const double mean = stats_mean(s);
 	return sqrt(s->sum_squares / s->count - mean*mean);
+}
+
+double stats2_stddev_x(struct stats2 *s) {
+	const double mean_x = stats2_mean_x(s);
+	return sqrt(s->sum_squares_x / s->count - mean_x*mean_x);
+}
+
+double stats2_stddev_y(struct stats2 *s) {
+	const double mean_y = stats2_mean_y(s);
+	return sqrt(s->sum_squares_y / s->count - mean_y*mean_y);
 }
 
 double stats_minimum(struct stats *s) {
@@ -193,10 +238,40 @@ struct histogram *stats_build_histogram(struct stats *s, double bucket_size, enu
 	return hist;
 }
 
+double stats_ideal_bucket_size(struct stats *s) {
+	double max = fabs(stats_maximum(s));
+	double min = fabs(stats_minimum(s));
+	if ( max == min )
+		max += max/1e6;
+	return (max - min)/((int)sqrt(s->count));
+}
+
 void stats_merge(struct stats *cumulative, struct stats *another) {
 	for ( int i=0; i<another->count; ++i ) {
 		stats_insert(cumulative, another->values[i]);
 	}
+}
+
+int stats2_linear_regression(struct stats2 *s, double *slope_dst, double *yint_dst) {
+	if ( s->count < 2 || slope_dst == NULL || yint_dst == NULL )
+		return 0;
+
+	const double slope = stats2_linear_correlation(s)*(stats2_stddev_y(s)/stats2_stddev_x(s));
+	if ( isnan(slope) || isinf(slope) )
+		return 0;
+	*slope_dst = slope;
+	*yint_dst = s->sum_y/s->count - slope*s->sum_x/s->count;
+	return 1;
+}
+
+// cov(x,y) = <(x - <x>)(y - <y>)> = <xy> - <x><y>
+// Note: We may be overlooking numerical stability issues.
+double stats2_covariance(struct stats2 *s) {
+	return s->sum_xy/s->count - stats2_mean_x(s)*stats2_mean_y(s);
+}
+
+double stats2_linear_correlation(struct stats2 *s) {
+	return stats2_covariance(s)/(stats2_stddev_x(s)*stats2_stddev_y(s));
 }
 
 //EOF
