@@ -39,7 +39,7 @@ else
 	$(CCTOOLS_LD) -O3 -fopenmp -o $@ $(CCTOOLS_INTERNAL_LDFLAGS) $(LOCAL_LDFLAGS) $^ $(LOCAL_LINKAGE) $(CCTOOLS_EXTERNAL_LINKAGE)
 endif
 
-resource_monitor_split: stats.o resource_monitor_split.o
+resource_monitor_split: stats.o mordor.o resource_monitor_split.o
 ifeq ($(CCTOOLS_STATIC),1)
 	@echo "resource_monitor_split cannot be built statically"
 else

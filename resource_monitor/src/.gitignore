@@ -1,3 +1,4 @@
 resource_monitor_cluster
 resource_monitor_histograms
+resource_monitor_split
 rmonitor_poll_example

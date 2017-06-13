@@ -7,6 +7,8 @@ See the file COPYING for details.
 #ifndef __STATS_H
 #define __STATS_H
 
+#include "histogram.h"
+
 struct stats {
 	double sum;
 	double sum_squares;
