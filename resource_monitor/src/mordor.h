@@ -13,6 +13,16 @@ See the file COPYING for details.
 #include "histogram.h"
 #include "stats.h"
 
+// Plotting styles
+enum mordor_style {
+	MORDOR_STYLE_CLASSIC, MORDOR_STYLE_CLEAN
+};
+
+// How to sort the mountains
+enum mordor_sortby {
+	MORDOR_SORTBY_NONE, MORDOR_SORTBY_MEAN, MORDOR_SORTBY_KEY
+};
+
 // I think they look like mountains. Kevin says they look like Mordor.
 // They are histograms inspired by famous pulsar plots from 1970.
 struct mordor {
@@ -33,23 +43,32 @@ struct mordor {
 	// inserted.  The dirty flag indicates that this needs to be done
 	// (otherwise we can spare the computation).
 	int dirty;
+
+	// Plotting style (affects data file and gnuplot script output)
+	enum mordor_style style;
+
+	// Sorting style (sorts the data file, which affects how it appears
+	// on the plot)
+	enum mordor_sortby sortby;
+
+	// (Optional) Strings for plotting
+	char *title;
+	char *xlabel;
+	char *ylabel;
 };
 
-// Initializes the plot
-void mordor_init(struct mordor *m);
+// Creates a Mordor plot.  The returned pointer must be freed with
+// mordor_delete().
+struct mordor *mordor_create(void);
 
 // Frees resources
-void mordor_free(struct mordor *m);
+void mordor_delete(struct mordor *m);
 
 // Inserts a key-value pair into the plot
 void mordor_insert(struct mordor *m, char *key, double value);
 
-// Writes the data file to be used by mordor_write_gnuplot().
-void mordor_write_datafile(struct mordor *m, FILE *out);
-
-// Writes a gnuplot script to plot the histogram.  The data_name is
-// the filename of the data written by mordor_write_data().
-void mordor_write_gnuplot(struct mordor *m, FILE *out, const char *data_name);
+// Writes data to data_file and a gnuplot script to gnuplot_file.
+void mordor_plot(struct mordor *m, const char *data_file, const char *gnuplot_file);
 
 #endif
 //EOF

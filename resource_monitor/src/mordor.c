@@ -6,6 +6,7 @@ See the file COPYING for details.
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "mordor.h"
 #include "list.h"
@@ -15,6 +16,9 @@ See the file COPYING for details.
 
 #define OUTPUT_FIELD_SEPARATOR " "
 #define OUTPUT_RECORD_SEPARATOR "\n"
+
+#define DEFAULT_MORDOR_STYLE MORDOR_STYLE_CLEAN
+#define DEFAULT_MORDOR_SORTBY MORDOR_SORTBY_MEAN
 
 // A single division/fraction.  This is the value of the key/value
 // pairs of struct mordor's hash table.
@@ -46,17 +50,24 @@ static void mordor_build_histograms(struct mordor *m) {
 	m->dirty = 0;
 }
 
-void mordor_init(struct mordor *m) {
-	m->table = hash_table_create(0, 0);
+struct mordor *mordor_create(void) {
+	struct mordor *m = xxmalloc(sizeof(*m));
 	stats_init(&m->cumulative_stats);
+	m->table = hash_table_create(0, 0);
+	m->style = DEFAULT_MORDOR_STYLE;
+	m->sortby = DEFAULT_MORDOR_SORTBY;
+	m->title = NULL;
+	m->xlabel = NULL;
+	m->ylabel = NULL;
 
 	// Calculate histogram when needed
 	m->cumulative_hist = NULL;
 	m->bucket_size = 0;
 	m->dirty = 1;
+	return m;
 }
 
-void mordor_free(struct mordor *m) {
+void mordor_delete(struct mordor *m) {
 	// Free mordor_mountains (values of hash table)
 	struct mordor_mountain *mtn;
 	hash_table_firstkey(m->table);
@@ -70,11 +81,12 @@ void mordor_free(struct mordor *m) {
 	}
 	hash_table_delete(m->table);
 
-	// Free cumulative
+	// Free cumulatives
 	stats_free(&m->cumulative_stats);
 	if ( m->cumulative_hist != NULL ) {
 		histogram_delete(m->cumulative_hist);
 	}
+	free(m);
 }
 
 void mordor_insert(struct mordor *m, char *key, double value) {
@@ -108,13 +120,15 @@ static int qsort_by_mean(const void *a, const void *b) {
 	return (A > B) - (A < B);
 }
 
-void mordor_write_datafile(struct mordor *m, FILE *out) {
-	mordor_build_histograms(m);
+static int qsort_by_key(const void *a, const void *b) {
+	return strcmp(((struct keyvalue_pair *)a)->key, ((struct keyvalue_pair *)b)->key);
+}
 
-	// Sorting the mountains by the mean of the distribution often gives
-	// some visual continuity to the result.
+static struct keyvalue_pair *create_sorted_keys(struct mordor *m) {
 	int num_mountains = hash_table_size(m->table);
 	struct keyvalue_pair *pairs = xxmalloc(num_mountains*sizeof(*pairs));
+
+	// Populate array
 	char *key;
 	struct mordor_mountain *value;
 	hash_table_firstkey(m->table); 
@@ -122,16 +136,33 @@ void mordor_write_datafile(struct mordor *m, FILE *out) {
 		pairs[i].key = key;
 		pairs[i].value = value;
 	}
-	qsort(pairs, num_mountains, sizeof(*pairs), qsort_by_mean);
+
+	// Sort it
+	switch ( m->sortby ) {
+	case MORDOR_SORTBY_MEAN:
+		qsort(pairs, num_mountains, sizeof(*pairs), qsort_by_mean);
+		break;
+	case MORDOR_SORTBY_KEY:
+		qsort(pairs, num_mountains, sizeof(*pairs), qsort_by_key);
+		break;
+	case MORDOR_SORTBY_NONE: 
+	default:
+		break;
+	}
+	return pairs;
+}
+
+static void mordor_datafile_classic(struct mordor *m, struct keyvalue_pair *sorted, FILE *out) {
+	int num_mountains = hash_table_size(m->table);
 
 	// First value is the bucket size, followed by text headers
 	fprintf(out, "%g" OUTPUT_FIELD_SEPARATOR "(all)", m->bucket_size);
 	for ( int column=0; column < num_mountains; ++column )
-		fprintf(out, OUTPUT_FIELD_SEPARATOR "%s", pairs[column].key);
+		fprintf(out, OUTPUT_FIELD_SEPARATOR "%s", sorted[column].key);
 	fprintf(out, OUTPUT_RECORD_SEPARATOR);
 
 	// A common bucket size is used for all histograms, and the
-	// cumulative histogram must necessarily have a bucket wherever an
+	// cumulative histogram necessarily has a bucket wherever an
 	// individual mountain's histogram does.  The first column is the
 	// start of the bucket's range, each subsequent column is the
 	// frequency for each mountain.
@@ -149,11 +180,11 @@ void mordor_write_datafile(struct mordor *m, FILE *out) {
 		const double bucket_start = cumulative_buckets[row];
 		fprintf(out, "%g" OUTPUT_FIELD_SEPARATOR "%d", bucket_start, histogram_count(m->cumulative_hist, bucket_start));
 		for ( int column=0; column < num_mountains; ++column )
-			fprintf(out, OUTPUT_FIELD_SEPARATOR "%d", histogram_count(pairs[column].value->hist, bucket_start));
+			fprintf(out, OUTPUT_FIELD_SEPARATOR "%d", histogram_count(sorted[column].value->hist, bucket_start));
 		fprintf(out, OUTPUT_RECORD_SEPARATOR);
 	}
 
-	// A last line of zeros
+	// A last line of zeros to help the plotter
 	fprintf(out, "%g" OUTPUT_FIELD_SEPARATOR "0", cumulative_buckets[num_buckets-1] + m->bucket_size);
 	for ( int column=0; column < num_mountains; ++column )
 		fprintf(out, OUTPUT_FIELD_SEPARATOR "0");
@@ -161,10 +192,284 @@ void mordor_write_datafile(struct mordor *m, FILE *out) {
 
 	// Clean up
 	free(cumulative_buckets);
-	free(pairs);
 }
 
-void mordor_write_gnuplot(struct mordor *m, FILE *out, const char *data_name) {
+static void mordor_datafile_clean(struct mordor *m, struct keyvalue_pair *sorted, FILE *out) {
+	int num_mountains = hash_table_size(m->table);
+	int num_buckets = histogram_size(m->cumulative_hist);
+	double *cumulative_buckets = histogram_buckets(m->cumulative_hist);
+
+	// First value is the bucket size, followed by text headers
+	fprintf(out, "%g" OUTPUT_FIELD_SEPARATOR "(all)", m->bucket_size);
+	for ( int column=0; column < num_mountains; ++column )
+		fprintf(out, OUTPUT_FIELD_SEPARATOR "%s", sorted[column].key);
+	fprintf(out, OUTPUT_RECORD_SEPARATOR);
+
+	// Arrays of first and last buckets' start for each mountain
+	double *start = xxmalloc(num_mountains*sizeof(*start));
+	double *finish = xxmalloc(num_mountains*sizeof(*finish));
+	for ( int i=0; i < num_mountains; ++i ) {
+		const int size = histogram_size(sorted[i].value->hist);
+		if ( size == 0 ) {
+			start[i] = 0;
+			finish[i] = 0;
+		} else {
+			double *buckets = histogram_buckets(sorted[i].value->hist);
+			start[i] = buckets[0];
+			finish[i] = buckets[size - 1];
+			free(buckets);
+		}
+	}
+
+	// Each mountain switches on, then switches off
+	enum {
+		STATE_NOT_STARTED=0, STATE_STARTED, STATE_FINISHED
+	} *state = xxcalloc(num_mountains, sizeof(*state));
+
+	// Padding each side with a line of zeros helps the plotter
+	fprintf(out, "%g" OUTPUT_FIELD_SEPARATOR "0", cumulative_buckets[0] - m->bucket_size);
+	for ( int mtn=0; mtn < num_mountains; ++mtn ) {
+		// If next bucket starts the mountain, write a zero
+		if ( cumulative_buckets[0] >= start[mtn] ) {
+			state[mtn] = STATE_STARTED;
+			fprintf(out, OUTPUT_FIELD_SEPARATOR "0");
+		} else {
+			fprintf(out, OUTPUT_FIELD_SEPARATOR "NAN");
+		}
+	}
+	fprintf(out, OUTPUT_RECORD_SEPARATOR);
+
+	for ( int bucket = 0; bucket < num_buckets; ++bucket ) {
+		double pos = cumulative_buckets[bucket];
+	write_row:
+		fprintf(out, "%g" OUTPUT_FIELD_SEPARATOR "%d", pos, histogram_count(m->cumulative_hist, pos));
+		for ( int mtn=0; mtn < num_mountains; ++mtn ) {
+			switch ( state[mtn] ) {
+			case STATE_FINISHED:
+				fprintf(out, OUTPUT_FIELD_SEPARATOR "NAN");
+				break;
+			case STATE_NOT_STARTED:
+				if ( pos + 1.5*m->bucket_size < start[mtn] )
+					break;
+				state[mtn] = STATE_STARTED;
+				// (fall through)
+			case STATE_STARTED:
+			default:
+				if ( pos > finish[mtn] )
+					state[mtn] = STATE_FINISHED;
+				fprintf(out, OUTPUT_FIELD_SEPARATOR "%d", histogram_count(sorted[mtn].value->hist, pos));
+				break;
+			}
+		}
+		fprintf(out, OUTPUT_RECORD_SEPARATOR);
+
+		// Histogram only records non-zero buckets, sometimes we need to insert rows to write zeros
+		if ( bucket < num_buckets - 1 && pos + 1.5*m->bucket_size < cumulative_buckets[bucket + 1] ) {
+			pos += m->bucket_size;
+			goto write_row;
+		}
+	}
+
+	// A last line of zeros to help the plotter
+	fprintf(out, "%g" OUTPUT_FIELD_SEPARATOR "0", cumulative_buckets[num_buckets - 1] + m->bucket_size);
+	for ( int mtn=0; mtn < num_mountains; ++mtn ) {
+		if ( state[mtn] == STATE_STARTED ) {
+			fprintf(out, OUTPUT_FIELD_SEPARATOR "0");
+		} else {
+			fprintf(out, OUTPUT_FIELD_SEPARATOR "NAN");
+		}
+	}
+	fprintf(out, OUTPUT_RECORD_SEPARATOR);
+
+	// Clean up
+	free(state);
+	free(finish);
+	free(start);
+	free(cumulative_buckets);
+}
+
+static void mordor_plotscript_classic(struct mordor *m, struct keyvalue_pair *sorted, FILE *out, const char *data_name) {
+	fprintf(out,
+	        "set terminal pngcairo enhanced size 1280,2048\n"
+	        "set key off\n"
+	        "set style fill transparent solid 0.9 border lc rgb 'black'\n"
+	        "set lmargin at screen 0.18\n"
+	        "set xtics font ',20'\n"
+	        "set style line 1 lc rgb 'black'\n"
+	        "set style line 2 lc rgb 'grey90'\n"
+	        "set output 'test.png'\n"
+	        "set multiplot layout 2,1");
+	if ( m->title == NULL ) {
+		fprintf(out, "\n");
+	} else {
+		fprintf(out, " title '%s' font ',22'\n", m->title);
+	}
+
+	// Upper plot: Cumulative histogram
+	fprintf(out,
+	        "set grid xtics\n"
+	        "set size 1,0.3\n"
+	        "set origin 0,0.7\n"
+	        "set bmargin 0\n"
+	        "set tmargin 2\n"
+	        "unset xlabel\n"
+	        "set format x ''\n"
+	        "unset ytics\n"
+	        "set yrange [0:]\n");
+	if ( m->ylabel != NULL ) {
+		fprintf(out, "set ylabel '%s' font ',20'\n", m->ylabel);
+	}
+	fprintf(out, "plot '%s' using 1:2 with filledcurves ls 1 notitle\n\n", data_name);
+
+	// Lower plot: Individual mountains
+	fprintf(out,
+	        "unset grid\n"
+	        "set size 1,0.7\n"
+	        "set origin 0,0\n"
+	        "set bmargin 3.5\n"
+	        "set tmargin 0\n"
+	        "set format x '%%g'\n"
+	        "unset ylabel\n"
+	        "set format y ''\n");
+	if ( m->xlabel != NULL ) {
+		fprintf(out, "set xlabel '%s' font ',20'\n", m->xlabel);
+	}
+
+	const double yscale = 1.0;  // scale factor for height of mountains
+	const double vspread = 1.5;  // separation between mountains
+	const int num_mountains = hash_table_size(m->table);
+
+	// Custom ytics labels from keys
+	int yskip = 1;
+	fprintf(out, "set ytics add (");
+	const char *sep = "";
+	for ( int i=0; i < num_mountains; i += yskip ) {
+		fprintf(out, "%s \"%s\" %g", sep, sorted[i].key, -vspread*i);
+		sep = ",";
+	}
+	fprintf(out, " ) font ',12'\n");
+	fprintf(out, "set yrange [%g:]\n", -vspread*num_mountains);
+	fprintf(out, "plot for [i=1:%d] '%s' using 1:(%g*column(i+3) - %g*i) with filledcurves ls 2 title columnhead(i+3)\n\n",
+					num_mountains, data_name, yscale, vspread);
+	fprintf(out, "unset multiplot\n");
+}
+
+static void mordor_plotscript_clean(struct mordor *m, struct keyvalue_pair *sorted, FILE *out, const char *data_name) {
+	fprintf(out,
+	        "set terminal pngcairo enhanced size 1280,2071\n" // golden ratio
+	        "set key off\n"
+	        "set border 1 lw 3\n"  // 1=bottom
+	        //"set lmargin at screen 0.18\n"
+	        "set lmargin at screen 0.01\n"
+	        "set rmargin at screen 0.99\n"
+	        "set style line 1 lc rgb 'black' lw 5\n"
+	        "set style line 2 lc rgb 'white'\n"
+	        "set style line 3 lc rgb 'gray50' lw 1\n"
+	        "set output 'test.png'\n");
+
+	// Multiplot with optional title string
+	fprintf(out, "set multiplot layout 2,1");
+	if ( m->title == NULL ) {
+		fprintf(out, "\n");
+	} else {
+		fprintf(out, " title '%s' font ',22'\n", m->title);
+	}
+
+	// Set universal xrange
+	double *buckets = histogram_buckets(m->cumulative_hist);
+	int num_buckets = histogram_size(m->cumulative_hist);
+	if ( num_buckets > 0 ) {
+		fprintf(out, "set xrange [%g:%g]\n", buckets[0] - m->bucket_size, buckets[num_buckets - 1] + m->bucket_size);
+	}
+	free(buckets);
+
+	// Upper plot: Cumulative histogram
+	fprintf(out,
+	        "set size 1,0.382\n"
+	        "set origin 0,0.618\n"
+	        "set bmargin 0\n"
+	        "set grid xtics ls 3\n"
+	        "unset xlabel\n"
+	        "set format x ''\n"
+	        "set xtics scale 0\n"
+	        "set style fill solid border lc rgb 'black'\n"
+	        /* "set xtics out nomirror font ',20'\n" */
+	        "unset ytics\n"
+	        "set yrange [0:*]\n");
+	if ( m->title != NULL ) {
+		fprintf(out, "set tmargin 2\n");
+	} else {
+		fprintf(out, "set tmargin 0.5\n");
+	}
+	if ( m->ylabel != NULL )
+		fprintf(out, "set ylabel '%s' font ',20'\n", m->ylabel);
+	fprintf(out, "plot '%s' using 1:2 with filledcurves above x2 ls 2 lw 7 notitle\n\n", data_name);
+
+	// Lower plot: Individual mountains
+	fprintf(out,
+	        "set size 1,0.618\n"
+	        "set origin 0,0\n"
+	        "set bmargin 4\n"
+	        "set tmargin 0\n"
+	        "unset grid\n"
+	        "set border 1 lw 7\n"
+	        "set style fill transparent solid 0.8 border lc rgb 'black'\n"
+	        "set xtics out scale default nomirror font ',20'\n"
+	        "set format x '%%g'\n"
+	        "unset ylabel\n"
+	        "set format y ''\n");
+	if ( m->xlabel != NULL ) {
+		fprintf(out, "set xlabel '%s' font ',20'\n", m->xlabel);
+	}
+
+	const double yscale = 1.0;  // scale factor for height of mountains
+	const double vspread = 1.5;  // separation between mountains
+	const int num_mountains = hash_table_size(m->table);
+
+	/* // Custom ytics labels from keys */
+	/* int yskip = 1; */
+	/* fprintf(out, "set ytics add ("); */
+	/* const char *sep = ""; */
+	/* for ( int i=0; i < num_mountains; i += yskip ) { */
+	/* 	fprintf(out, "%s \"%s\" %g", sep, sorted[i].key, -vspread*i); */
+	/* 	sep = ","; */
+	/* } */
+	/* fprintf(out, " ) font ',12'\n"); */
+	fprintf(out, "set yrange [%g:*]\n", -vspread*num_mountains);
+	fprintf(out, "plot for [i=1:%d] '%s' using 1:(%g*column(i+3) - %g*i) with filledcurves closed ls 2 title columnhead(i+3)\n\n",
+					num_mountains, data_name, yscale, vspread);
+	fprintf(out, "unset multiplot\n");
+}
+
+void mordor_plot(struct mordor *m, const char *data_name, const char *gnuplot_file) {
+	// Refresh histograms if needed
+	mordor_build_histograms(m);
+
+	// Sorting the mountains by the mean of the distribution often gives
+	// some visual continuity to the result.
+	struct keyvalue_pair *sorted = create_sorted_keys(m);
+
+	FILE *data, *gnuplot;
+	if ( (data = fopen(data_name, "w")) == NULL )
+		fatal("Can't open \"%s\" for writing.", data_name);
+	if ( (gnuplot = fopen(gnuplot_file, "w")) == NULL )
+		fatal("Can't open \"%s\" for writing.", gnuplot_file);
+
+	switch ( m->style ) {
+	case MORDOR_STYLE_CLASSIC:
+		mordor_datafile_classic(m, sorted, data);
+		mordor_plotscript_classic(m, sorted, gnuplot, data_name);
+		break;
+	case MORDOR_STYLE_CLEAN:
+	default:
+		mordor_datafile_clean(m, sorted, data);
+		mordor_plotscript_clean(m, sorted, gnuplot, data_name);
+		break;
+	}
+
+	fclose(data);
+	fclose(gnuplot);
+	free(sorted);
 }
 
 //EOF
