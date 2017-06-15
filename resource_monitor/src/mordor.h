@@ -67,8 +67,10 @@ void mordor_delete(struct mordor *m);
 // Inserts a key-value pair into the plot
 void mordor_insert(struct mordor *m, char *key, double value);
 
-// Writes data to data_file and a gnuplot script to gnuplot_file.
-void mordor_plot(struct mordor *m, const char *data_file, const char *gnuplot_file);
+// Writes the formatted data and gnuplot script.  The script will
+// generate a file named pngfile.  The datafile is the name of the
+// data file relative to the gnuplot script.
+void mordor_plot(struct mordor *m, const char *pngfile, FILE *data, FILE *gnuplot, const char *datafile);
 
 #endif
 //EOF

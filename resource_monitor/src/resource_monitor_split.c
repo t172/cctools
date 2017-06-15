@@ -25,32 +25,24 @@ See the file COPYING for details.
 #include "jx_pretty_print.h"
 #include "list.h"
 #include "hash_table.h"
-#include "histogram.h"
 #include "stats.h"
+#include "mordor.h"
 
-// What a category is called in the JSON summary data
+// Field names as they appear in the JSON data
 #define FIELD_CATEGORY "category"
-
-// What the task ID is called in the JSON summary data
 #define FIELD_TASK_ID "task_id"
+#define FIELD_WALL_TIME "wall_time"
 
-// How to separate fields in output (text) data files
-#define OUTPUT_FIELD_SEPARATOR " "
+/* // Data file formats */
+/* #define OUTPUT_FIELD_SEPARATOR " " */
+/* #define OUTPUT_RECORD_SEPARATOR "\n" */
+/* #define OUTPUT_COMMENT "#" */
+/* #define OUTPUT_PLACEHOLDER "NAN" */
 
-// How to separate records in output (text) data files
-#define OUTPUT_RECORD_SEPARATOR "\n"
+/* // Name used for cumulative stats (used in filename) */
+/* #define ALLSTATS_NAME "(all)" */
 
-// How to start a comment in output (text) data files
-#define OUTPUT_COMMENT "#"
-
-// A numeric placeholder for (text) data files (not-a-number is
-// ignored by gnuplot and not plotted)
-#define OUTPUT_PLACEHOLDER "NAN"
-
-// Name used for cumulative stats (used in filename)
-#define ALLSTATS_NAME "(all)"
-
-#define VSUNITS_NAME "vs_units"
+/* #define VSUNITS_NAME "vs_units" */
 
 #define SUBDIR_DATA "data"
 #define SUBDIR_PLOT ""
@@ -78,6 +70,7 @@ See the file COPYING for details.
 #define TO_STR_EVAL(x) #x
 #define TO_STR(x) TO_STR_EVAL(x)
 
+// Command line options
 static struct {
 	// The input file name
 	char *infile;
@@ -118,9 +111,13 @@ struct record {
 	int work_units_processed;
 };
 
-static int string_compare(const void *a, const void *b) {
-	return strcmp(*(char *const *)a, *(char *const *)b);
-}
+// The previously encountered unit of measure (string), hashed by
+// output field
+struct hash_table *units_of_measure;
+
+/* static int string_compare(const void *a, const void *b) { */
+/* 	return strcmp(*(char *const *)a, *(char *const *)b); */
+/* } */
 
 // Creates a new record pointing to the given JSON, which must be
 // freed with record_delete().
@@ -139,6 +136,8 @@ void record_delete(struct record *r) {
 // Make a string pretty for formal presentation.  Returns a new string
 // that must be freed.
 static char *presentation_string(const char *s) {
+	if ( s == NULL )
+		return NULL;
 	char *str = xxstrdup(s);
 	char *pos;
 
@@ -232,12 +231,14 @@ void process_cmdline(int argc, char *argv[]) {
 
 	// Default output fields
 	if ( cmdline.fields == NULL ) {
-		cmdline.num_fields = 4;
+		cmdline.num_fields = 1;//
+		/* cmdline.num_fields = 4; */
 		cmdline.fields = xxmalloc(cmdline.num_fields*sizeof(*cmdline.fields));
-		cmdline.fields[0] = "wall_time";
-		cmdline.fields[1] = "cpu_time";
-		cmdline.fields[2] = "memory";
-		cmdline.fields[3] = "disk";
+		/* cmdline.fields[0] = "wall_time"; */
+		/* cmdline.fields[1] = "cpu_time"; */
+		cmdline.fields[0] = "cpu_time";
+		/* cmdline.fields[2] = "memory"; */
+		/* cmdline.fields[3] = "disk"; */
 	}
 }
 
@@ -311,15 +312,14 @@ void read_jsonfile(const char *jsonfile, struct list *dst) {
 }
 
 // Given a list of summaries, group (hash) them by the value of some JSON field
-struct hash_table *group_by_field(struct list *list, const char *field) {
+struct hash_table *hash_by_field(struct list *list, const char *field) {
 	struct hash_table *grouped = hash_table_create(0, 0);
-	struct record *item;
 	struct list *bucket;
 	int num_groups = 0;
 	int dropped_summaries = 0;
 
 	list_first_item(list);
-	while ( (item = list_next_item(list)) != 0 ) {
+	for ( struct record *item; (item = list_next_item(list)) != 0; ) {
 		struct jx *value = jx_lookup(item->json, field);
 		if ( value == NULL || !jx_istype(value, JX_STRING) ) {
 			dropped_summaries++;
@@ -365,48 +365,48 @@ static char *category_directory(const char *category, const char *subdir) {
 	}
 }
 
-// Retrieves the value of the given field from a struct record's JSON,
-// writing the value as a double to dst.  On error, returns zero and
-// nothing is written to dst.
-static int get_json_value(struct record *item, const char *field, struct hash_table *units_of_measure, double *dst) {
-	static int warned_inconsistent_units = 0;
-	struct jx *jx_value = jx_lookup(item->json, field);
-	if ( jx_value == NULL )
-		return 0;
+/* // Retrieves the value of the given field from a struct record's JSON, */
+/* // writing the value as a double to dst.  On error, returns zero and */
+/* // nothing is written to dst. */
+/* static int get_json_value(struct record *item, const char *field, struct hash_table *units_of_measure, double *dst) { */
+/* 	static int warned_inconsistent_units = 0; */
+/* 	struct jx *jx_value = jx_lookup(item->json, field); */
+/* 	if ( jx_value == NULL ) */
+/* 		return 0; */
 
-	struct jx *jx_unit;
-	if ( jx_value->type == JX_ARRAY ) {
-		// Keep track of the unit of measure
-		if ( units_of_measure != NULL ) {
-			jx_unit = jx_array_index(jx_value, 1);
-			if ( jx_unit != NULL && jx_unit->type == JX_STRING ) {
-				char *previous_unit = hash_table_lookup(units_of_measure, field);
-				if ( previous_unit == NULL ) {
-					hash_table_insert(units_of_measure, field, xxstrdup(jx_unit->u.string_value));
-				} else {
-					if ( strcmp(previous_unit, jx_unit->u.string_value) != 0 && !warned_inconsistent_units ) {
-						warn(D_RMON, "Encountered inconsistent units for \"%s\": \"%s\" and \"%s\".",
-								 field, previous_unit, jx_unit->u.string_value);
-						warned_inconsistent_units = 1;
-					}
-				}
-			}
-		}
+/* 	struct jx *jx_unit; */
+/* 	if ( jx_value->type == JX_ARRAY ) { */
+/* 		// Keep track of the unit of measure */
+/* 		if ( units_of_measure != NULL ) { */
+/* 			jx_unit = jx_array_index(jx_value, 1); */
+/* 			if ( jx_unit != NULL && jx_unit->type == JX_STRING ) { */
+/* 				char *previous_unit = hash_table_lookup(units_of_measure, field); */
+/* 				if ( previous_unit == NULL ) { */
+/* 					hash_table_insert(units_of_measure, field, xxstrdup(jx_unit->u.string_value)); */
+/* 				} else { */
+/* 					if ( strcmp(previous_unit, jx_unit->u.string_value) != 0 && !warned_inconsistent_units ) { */
+/* 						warn(D_RMON, "Encountered inconsistent units for \"%s\": \"%s\" and \"%s\".", */
+/* 								 field, previous_unit, jx_unit->u.string_value); */
+/* 						warned_inconsistent_units = 1; */
+/* 					} */
+/* 				} */
+/* 			} */
+/* 		} */
 		
-		// First is the value
-		jx_value = jx_array_index(jx_value, 0);
-		if ( jx_value == NULL )
-			return 0;
-	}
-	if ( jx_value->type == JX_DOUBLE ) {
-		*dst = jx_value->u.double_value;
-		return 1;
-	} else if ( jx_value->type == JX_INTEGER ) {
-		*dst = jx_value->u.integer_value;
-		return 1;
-	}
-	return 0; // failure
-}
+/* 		// First is the value */
+/* 		jx_value = jx_array_index(jx_value, 0); */
+/* 		if ( jx_value == NULL ) */
+/* 			return 0; */
+/* 	} */
+/* 	if ( jx_value->type == JX_DOUBLE ) { */
+/* 		*dst = jx_value->u.double_value; */
+/* 		return 1; */
+/* 	} else if ( jx_value->type == JX_INTEGER ) { */
+/* 		*dst = jx_value->u.integer_value; */
+/* 		return 1; */
+/* 	} */
+/* 	return 0; // failure */
+/* } */
 
 // Opens an output file with the given name in a subdirectory created
 // for the given category.
@@ -424,588 +424,601 @@ static FILE *open_category_file(const char *category, const char *subdir, const 
 	return f;
 }
 
-static void write_histograms_files(struct hash_table *stats_table[2], struct hash_table *bucket_sizes[2], const char *split_key, const char *category) {
-	char *hist_filename[2] = { string_format("%s.hist", split_key), string_format("%s_perunit.hist", split_key) };
-	for ( int i=0; i<2; ++i ) {
-		FILE *out = open_category_file(category, SUBDIR_DATA, hist_filename[i]);
-		free(hist_filename[i]);
-		fprintf(out, OUTPUT_COMMENT);
+/* static void write_histograms_files(struct hash_table *stats_table[2], struct hash_table *bucket_sizes[2], const char *split_key, const char *category) { */
+/* 	char *hist_filename[2] = { string_format("%s.hist", split_key), string_format("%s_perunit.hist", split_key) }; */
+/* 	for ( int i=0; i<2; ++i ) { */
+/* 		FILE *out = open_category_file(category, SUBDIR_DATA, hist_filename[i]); */
+/* 		free(hist_filename[i]); */
+/* 		fprintf(out, OUTPUT_COMMENT); */
 
-		struct histogram **histograms = xxmalloc(cmdline.num_fields*sizeof(*histograms));
-		double **buckets = xxmalloc(cmdline.num_fields*sizeof(*buckets));
-		int max_histsize = 0;
+/* 		struct histogram **histograms = xxmalloc(cmdline.num_fields*sizeof(*histograms)); */
+/* 		double **buckets = xxmalloc(cmdline.num_fields*sizeof(*buckets)); */
+/* 		int max_histsize = 0; */
 
-		// Build histograms
-		char *outfield;
-		const char *sep = "";
-		for ( int f=0; f < cmdline.num_fields; ++f ) {
-			outfield = cmdline.fields[f];
-			struct stats *stat = hash_table_lookup(stats_table[i], outfield);
-			struct histogram *hist = stats_build_histogram(stat, *(double *)hash_table_lookup(bucket_sizes[i], outfield), STATS_KEEP_OUTLIERS);
-			histograms[f] = hist;
-			if ( hist != NULL ) {
-				buckets[f] = histogram_buckets(hist);
-				const int hist_size = histogram_size(hist);
-				if ( max_histsize < hist_size )
-					max_histsize = hist_size;
-			}
+/* 		// Build histograms */
+/* 		char *outfield; */
+/* 		const char *sep = ""; */
+/* 		for ( int f=0; f < cmdline.num_fields; ++f ) { */
+/* 			outfield = cmdline.fields[f]; */
+/* 			struct stats *stat = hash_table_lookup(stats_table[i], outfield); */
+/* 			struct histogram *hist = stats_build_histogram(stat, *(double *)hash_table_lookup(bucket_sizes[i], outfield), STATS_KEEP_OUTLIERS); */
+/* 			histograms[f] = hist; */
+/* 			if ( hist != NULL ) { */
+/* 				buckets[f] = histogram_buckets(hist); */
+/* 				const int hist_size = histogram_size(hist); */
+/* 				if ( max_histsize < hist_size ) */
+/* 					max_histsize = hist_size; */
+/* 			} */
 
-			// Print header with column names
-			fprintf(out, "%1$s%2$s_start" OUTPUT_FIELD_SEPARATOR "%2$s_freq", sep, outfield);
-			sep = OUTPUT_FIELD_SEPARATOR;
-		}
-		fprintf(out, OUTPUT_RECORD_SEPARATOR);
+/* 			// Print header with column names */
+/* 			fprintf(out, "%1$s%2$s_start" OUTPUT_FIELD_SEPARATOR "%2$s_freq", sep, outfield); */
+/* 			sep = OUTPUT_FIELD_SEPARATOR; */
+/* 		} */
+/* 		fprintf(out, OUTPUT_RECORD_SEPARATOR); */
 
-		// Write them to file
-		for ( int bucket=0; bucket < max_histsize; ++bucket ) {
-			sep = "";
-			for ( int f=0; f < cmdline.num_fields; ++f ) {
-				struct histogram *hist = histograms[f];
-				if ( hist == NULL || bucket >= histogram_size(hist) ) {
-					// Insert placeholders
-					fprintf(out, "%s" OUTPUT_PLACEHOLDER OUTPUT_FIELD_SEPARATOR OUTPUT_PLACEHOLDER, sep);
-				} else {
-					const double start = buckets[f][bucket];
-					fprintf(out, "%s%g" OUTPUT_FIELD_SEPARATOR "%d", sep, start, histogram_count(hist, start));
-				}
-				sep = OUTPUT_FIELD_SEPARATOR;
-			}
-			fprintf(out, OUTPUT_RECORD_SEPARATOR);
-		}
+/* 		// Write them to file */
+/* 		for ( int bucket=0; bucket < max_histsize; ++bucket ) { */
+/* 			sep = ""; */
+/* 			for ( int f=0; f < cmdline.num_fields; ++f ) { */
+/* 				struct histogram *hist = histograms[f]; */
+/* 				if ( hist == NULL || bucket >= histogram_size(hist) ) { */
+/* 					// Insert placeholders */
+/* 					fprintf(out, "%s" OUTPUT_PLACEHOLDER OUTPUT_FIELD_SEPARATOR OUTPUT_PLACEHOLDER, sep); */
+/* 				} else { */
+/* 					const double start = buckets[f][bucket]; */
+/* 					fprintf(out, "%s%g" OUTPUT_FIELD_SEPARATOR "%d", sep, start, histogram_count(hist, start)); */
+/* 				} */
+/* 				sep = OUTPUT_FIELD_SEPARATOR; */
+/* 			} */
+/* 			fprintf(out, OUTPUT_RECORD_SEPARATOR); */
+/* 		} */
 
-		// Clean up
-		fclose(out);
-		for ( int f=0; f < cmdline.num_fields; ++f ) {
-			if ( histograms[f] != NULL )
-				histogram_delete(histograms[f]);
-		}
-		free(histograms);
-	}
-}
+/* 		// Clean up */
+/* 		fclose(out); */
+/* 		for ( int f=0; f < cmdline.num_fields; ++f ) { */
+/* 			if ( histograms[f] != NULL ) */
+/* 				histogram_delete(histograms[f]); */
+/* 		} */
+/* 		free(histograms); */
+/* 	} */
+/* } */
 
-// Plots <output_field> vs. <work_units_processed>, regardless of
-// split_key (e.g. host).
-void write_vs_units_plots(struct hash_table *grouping, const char *category, struct hash_table *units_of_measure) {
-	// Find ways to give up
-	if ( hash_table_size(grouping) == 0 )
-		return;
-	if ( category == NULL || category[0] == '\0' ) {
-		warn(D_RMON, "No category given or empty string.");
-		return;
-	}
+/* // Plots <output_field> vs. <work_units_processed>, regardless of */
+/* // split_key (e.g. host). */
+/* void write_vs_units_plots(struct hash_table *grouping, const char *category) { */
+/* 	// Find ways to give up */
+/* 	if ( hash_table_size(grouping) == 0 ) */
+/* 		return; */
+/* 	if ( category == NULL || category[0] == '\0' ) { */
+/* 		warn(D_RMON, "No category given or empty string."); */
+/* 		return; */
+/* 	} */
 
-	// Write data file header
-	FILE *out = open_category_file(category, SUBDIR_DATA, VSUNITS_NAME ".dat");
-	fprintf(out, OUTPUT_COMMENT "" FIELD_TASK_ID "" OUTPUT_FIELD_SEPARATOR "units_processed" OUTPUT_FIELD_SEPARATOR "units");
-	for ( int f=0; f < cmdline.num_fields; ++f ) {
-		fprintf(out, OUTPUT_FIELD_SEPARATOR "%s", cmdline.fields[f]);
-	}
-	fprintf(out, OUTPUT_RECORD_SEPARATOR);
+/* 	// Write data file header */
+/* 	FILE *out = open_category_file(category, SUBDIR_DATA, VSUNITS_NAME ".dat"); */
+/* 	fprintf(out, OUTPUT_COMMENT "" FIELD_TASK_ID "" OUTPUT_FIELD_SEPARATOR "units_processed" OUTPUT_FIELD_SEPARATOR "units"); */
+/* 	for ( int f=0; f < cmdline.num_fields; ++f ) { */
+/* 		fprintf(out, OUTPUT_FIELD_SEPARATOR "%s", cmdline.fields[f]); */
+/* 	} */
+/* 	fprintf(out, OUTPUT_RECORD_SEPARATOR); */
 
-	const int UNITS_PROCESSED = 0;
-	const int UNITS_TOTAL = 1;
-	const char *const display_string[] = { "Work Units Processed", "Total Work Units" };
-	const char *const name_string[] = { "units_processed", "units_total" };
+/* 	const int UNITS_PROCESSED = 0; */
+/* 	const int UNITS_TOTAL = 1; */
+/* 	const char *const display_string[] = { "Work Units Processed", "Total Work Units" }; */
+/* 	const char *const name_string[] = { "units_processed", "units_total" }; */
 
-	// Keep two-dimensional stats of {units_processed,units} vs. {all output fields}
-	struct stats2 (*stat)[2] = xxmalloc(cmdline.num_fields*sizeof(*stat));
-	for ( int f=0; f < cmdline.num_fields; ++f ) {
-		stats2_init(&stat[f][UNITS_PROCESSED]);
-		stats2_init(&stat[f][UNITS_TOTAL]);
-	}
+/* 	// Keep two-dimensional stats of {units_processed,units} vs. {all output fields} */
+/* 	struct stats2 (*stat)[2] = xxmalloc(cmdline.num_fields*sizeof(*stat)); */
+/* 	for ( int f=0; f < cmdline.num_fields; ++f ) { */
+/* 		stats2_init(&stat[f][UNITS_PROCESSED]); */
+/* 		stats2_init(&stat[f][UNITS_TOTAL]); */
+/* 	} */
 
-	// Write data
-	char *ignored_key;
-	hash_table_firstkey(grouping);
-	for ( struct list *record_list; hash_table_nextkey(grouping, &ignored_key, (void **)&record_list); ) {
-		list_first_item(record_list);
-		for ( struct record *item; (item = list_next_item(record_list)) != NULL; ) {
-			struct jx *task_id_jx;
-			const char *task_id = NULL;
-			if ( (task_id_jx = jx_lookup(item->json, FIELD_TASK_ID)) != NULL && task_id_jx->type == JX_STRING )
-				task_id = task_id_jx->u.string_value;
-			fprintf(out, "%s" OUTPUT_FIELD_SEPARATOR "%d" OUTPUT_FIELD_SEPARATOR "%d",
-							task_id, item->work_units_processed, item->work_units_total);
-			for ( int f=0; f < cmdline.num_fields; ++f ) {
-				double value;
-				if ( !get_json_value(item, cmdline.fields[f], NULL, &value) ) {
-					fprintf(out, OUTPUT_FIELD_SEPARATOR "" OUTPUT_PLACEHOLDER);
-				} else {
-					fprintf(out, OUTPUT_FIELD_SEPARATOR "%g", value);
-					stats2_insert(&stat[f][UNITS_PROCESSED], item->work_units_processed, value);
-					stats2_insert(&stat[f][UNITS_TOTAL], item->work_units_total, value);
-				}
-			}
-			fprintf(out, OUTPUT_RECORD_SEPARATOR);
-		}
-	}
-	fclose(out);
+/* 	// Write data */
+/* 	char *ignored_key; */
+/* 	hash_table_firstkey(grouping); */
+/* 	for ( struct list *record_list; hash_table_nextkey(grouping, &ignored_key, (void **)&record_list); ) { */
+/* 		list_first_item(record_list); */
+/* 		for ( struct record *item; (item = list_next_item(record_list)) != NULL; ) { */
+/* 			struct jx *task_id_jx; */
+/* 			const char *task_id = NULL; */
+/* 			if ( (task_id_jx = jx_lookup(item->json, FIELD_TASK_ID)) != NULL && task_id_jx->type == JX_STRING ) */
+/* 				task_id = task_id_jx->u.string_value; */
+/* 			fprintf(out, "%s" OUTPUT_FIELD_SEPARATOR "%d" OUTPUT_FIELD_SEPARATOR "%d", */
+/* 							task_id, item->work_units_processed, item->work_units_total); */
+/* 			for ( int f=0; f < cmdline.num_fields; ++f ) { */
+/* 				double value; */
+/* 				if ( !get_json_value(item, cmdline.fields[f], NULL, &value) ) { */
+/* 					fprintf(out, OUTPUT_FIELD_SEPARATOR "" OUTPUT_PLACEHOLDER); */
+/* 				} else { */
+/* 					fprintf(out, OUTPUT_FIELD_SEPARATOR "%g", value); */
+/* 					stats2_insert(&stat[f][UNITS_PROCESSED], item->work_units_processed, value); */
+/* 					stats2_insert(&stat[f][UNITS_TOTAL], item->work_units_total, value); */
+/* 				} */
+/* 			} */
+/* 			fprintf(out, OUTPUT_RECORD_SEPARATOR); */
+/* 		} */
+/* 	} */
+/* 	fclose(out); */
 
-	// Write a gnuplot script
-	out = open_category_file(category, SUBDIR_PLOT, "vs_units.gp");
-	fprintf(out, "set terminal pngcairo enhanced size 1024,768\n");
-	fprintf(out, "set tics font ',16'\n");
-	fprintf(out, "set style line 1 lc rgb 'gray20' pt 7\n");
-	fprintf(out, "set style line 2 lc rgb '#880000' lw 4\n");
-	fprintf(out, "set style fill transparent solid 0.1 noborder\n");
-	fprintf(out, "unset key\n");
-	fprintf(out, "set yrange [0:]\n");
+/* 	// Write a gnuplot script */
+/* 	out = open_category_file(category, SUBDIR_PLOT, "vs_units.gp"); */
+/* 	fprintf(out, "set terminal pngcairo enhanced size 1024,768\n"); */
+/* 	fprintf(out, "set tics font ',16'\n"); */
+/* 	fprintf(out, "set style line 1 lc rgb 'gray20' pt 7\n"); */
+/* 	fprintf(out, "set style line 2 lc rgb '#880000' lw 4\n"); */
+/* 	fprintf(out, "set style fill transparent solid 0.1 noborder\n"); */
+/* 	fprintf(out, "unset key\n"); */
+/* 	fprintf(out, "set yrange [0:]\n"); */
 	
-	for ( int f=0; f < cmdline.num_fields; ++f ) {
-		const char *pretty_field = presentation_string(cmdline.fields[f]);
-		for ( int u=0; u < 2; ++u ) {
-			fprintf(out, "\n# %s vs. %s\n", pretty_field, display_string[u]);
-			fprintf(out, "set output '%s_vs_%s.png'\n", cmdline.fields[f], name_string[u]);
-			fprintf(out, "set title '%s vs. %s  (%ld \"%s\" Summaries)' font ',22'\n",
-							pretty_field, display_string[u], stat[f][u].count, category);
-			fprintf(out, "set xlabel '%s' font ',20'\n", display_string[u]);
-			double left = stat[f][u].min_x - 0.01*(stat[f][u].max_x - stat[f][u].min_x);
-			fprintf(out, "set xrange [%g:%g]\n", left<0 ? left : 0, stat[f][u].max_x + 0.01*(stat[f][u].max_x - stat[f][u].min_x));
-			const char *unit_string = hash_table_lookup(units_of_measure, cmdline.fields[f]);
-			const char *original_unit = unit_string;
-			double unit_conversion = 1;
-			if ( strcmp(unit_string, "MB") == 0 ) {
-				// Convert MB to GB
-				unit_string = "GB";
-				fprintf(out, "convert_unit(y) = y/1024\n");
-				unit_conversion = 1024;
-			} else if ( strcmp(unit_string, "s" ) == 0 ) {
-				// Convert s to hr
-				unit_string = "hr";
-				fprintf(out, "convert_unit(y) = y/3600\n");
-				unit_conversion = 3600;
-			} else {
-				fprintf(out, "convert_unit(y) = y\n");
-				unit_conversion = 1;
-			}
-			fprintf(out, "set ylabel '%s", pretty_field);
-			if ( unit_string != NULL ) {
-				fprintf(out, " (%s)", unit_string);
-			}
-			fprintf(out, "' font ',20'\n");
-			fprintf(out, "set style circle radius %g\n", 0.01*stat[f][u].max_x);
+/* 	for ( int f=0; f < cmdline.num_fields; ++f ) { */
+/* 		const char *pretty_field = presentation_string(cmdline.fields[f]); */
+/* 		for ( int u=0; u < 2; ++u ) { */
+/* 			fprintf(out, "\n# %s vs. %s\n", pretty_field, display_string[u]); */
+/* 			fprintf(out, "set output '%s_vs_%s.png'\n", cmdline.fields[f], name_string[u]); */
+/* 			fprintf(out, "set title '%s vs. %s  (%ld \"%s\" Summaries)' font ',22'\n", */
+/* 							pretty_field, display_string[u], stat[f][u].count, category); */
+/* 			fprintf(out, "set xlabel '%s' font ',20'\n", display_string[u]); */
+/* 			double left = stat[f][u].min_x - 0.01*(stat[f][u].max_x - stat[f][u].min_x); */
+/* 			fprintf(out, "set xrange [%g:%g]\n", left<0 ? left : 0, stat[f][u].max_x + 0.01*(stat[f][u].max_x - stat[f][u].min_x)); */
+/* 			const char *unit_string = hash_table_lookup(units_of_measure, cmdline.fields[f]); */
+/* 			const char *original_unit = unit_string; */
+/* 			double unit_conversion = 1; */
+/* 			if ( strcmp(unit_string, "MB") == 0 ) { */
+/* 				// Convert MB to GB */
+/* 				unit_string = "GB"; */
+/* 				fprintf(out, "convert_unit(y) = y/1024\n"); */
+/* 				unit_conversion = 1024; */
+/* 			} else if ( strcmp(unit_string, "s" ) == 0 ) { */
+/* 				// Convert s to hr */
+/* 				unit_string = "hr"; */
+/* 				fprintf(out, "convert_unit(y) = y/3600\n"); */
+/* 				unit_conversion = 3600; */
+/* 			} else { */
+/* 				fprintf(out, "convert_unit(y) = y\n"); */
+/* 				unit_conversion = 1; */
+/* 			} */
+/* 			fprintf(out, "set ylabel '%s", pretty_field); */
+/* 			if ( unit_string != NULL ) { */
+/* 				fprintf(out, " (%s)", unit_string); */
+/* 			} */
+/* 			fprintf(out, "' font ',20'\n"); */
+/* 			fprintf(out, "set style circle radius %g\n", 0.01*stat[f][u].max_x); */
 
-			double a, b;
-			const int have_regression = stats2_linear_regression(&stat[f][u], &a, &b);
-			if ( have_regression ) {
-				fprintf(out, "set label 1 \"{/Oblique y} = (%2$g %1$s){/Oblique x} + (%3$g %1$s)\\n"
-								"correlation %4$f\" at screen 0.52,0.17 left font ',18'\n",
-								original_unit, a, b,	stats2_linear_correlation(&stat[f][u]));
-			} else {
-				fprintf(out, "set label 1 \"\"\n");
-			}
-			fprintf(out, "plot '%s%s" VSUNITS_NAME ".dat'", SUBDIR_DATA, SUBDIR_DATA[0] != '\0' ? "/" : "");
-			fprintf(out, " using %d:(convert_unit($%d)) with circles ls 1 notitle", u+2, f+4);
-			if ( have_regression ) {
-				fprintf(out, ", \\\n\tconvert_unit(%g*x + %g) with lines ls 2 notitle\n", a, b);
-			} else {
-				fprintf(out, "\n");
-			}
-		}
-	} 
-	fclose(out);
-}
+/* 			double a, b; */
+/* 			const int have_regression = stats2_linear_regression(&stat[f][u], &a, &b); */
+/* 			if ( have_regression ) { */
+/* 				fprintf(out, "set label 1 \"{/Oblique y} = (%2$g %1$s){/Oblique x} + (%3$g %1$s)\\n" */
+/* 								"correlation %4$f\" at screen 0.52,0.17 left font ',18'\n", */
+/* 								original_unit, a, b,	stats2_linear_correlation(&stat[f][u])); */
+/* 			} else { */
+/* 				fprintf(out, "set label 1 \"\"\n"); */
+/* 			} */
+/* 			fprintf(out, "plot '%s%s" VSUNITS_NAME ".dat'", SUBDIR_DATA, SUBDIR_DATA[0] != '\0' ? "/" : ""); */
+/* 			fprintf(out, " using %d:(convert_unit($%d)) with circles ls 1 notitle", u+2, f+4); */
+/* 			if ( have_regression ) { */
+/* 				fprintf(out, ", \\\n\tconvert_unit(%g*x + %g) with lines ls 2 notitle\n", a, b); */
+/* 			} else { */
+/* 				fprintf(out, "\n"); */
+/* 			} */
+/* 		} */
+/* 	}  */
+/* 	fclose(out); */
+/* } */
 
-// Will populate bucket_sizes[0] with bucket sizes used for original
-// histogram and bucket_sizes[1] with bucket sizes for the per-unit
-// histograms.
-void write_avgs(struct hash_table *grouping, const char *category, struct hash_table *units_of_measure, struct hash_table *bucket_sizes[2]) {
-	// Find ways to give up
-	if ( hash_table_size(grouping) == 0 )
-		return;
-	if ( category == NULL || category[0] == '\0' ) {
-		warn(D_RMON, "No category given or empty string.");
-		return;
-	}
+/* // Will populate bucket_sizes[0] with bucket sizes used for original */
+/* // histogram and bucket_sizes[1] with bucket sizes for the per-unit */
+/* // histograms. */
+/* void write_avgs(struct hash_table *grouping, const char *category, struct hash_table *units_of_measure, struct hash_table *bucket_sizes[2]) { */
+/* 	// Find ways to give up */
+/* 	if ( hash_table_size(grouping) == 0 ) */
+/* 		return; */
+/* 	if ( category == NULL || category[0] == '\0' ) { */
+/* 		warn(D_RMON, "No category given or empty string."); */
+/* 		return; */
+/* 	} */
 
-	struct hash_table *output_file[2] = { hash_table_create(0, 0), hash_table_create(0, 0) };
+/* 	struct hash_table *output_file[2] = { hash_table_create(0, 0), hash_table_create(0, 0) }; */
 
-	// Maintain stats for each split_list
-	struct hash_table *stats[2] = { hash_table_create(0, 0), hash_table_create(0, 0) };
+/* 	// Maintain stats for each split_list */
+/* 	struct hash_table *stats[2] = { hash_table_create(0, 0), hash_table_create(0, 0) }; */
 
-	// Maintain stats for all data, [0] is original values, [1] is value
-	// per work unit processed
-	struct hash_table *all_stats[2] = { hash_table_create(0, 0), hash_table_create(0, 0) };
+/* 	// Maintain stats for all data, [0] is original values, [1] is value */
+/* 	// per work unit processed */
+/* 	struct hash_table *all_stats[2] = { hash_table_create(0, 0), hash_table_create(0, 0) }; */
 
-	for ( int f=0; f < cmdline.num_fields; ++f ) {
-		char *outfield = cmdline.fields[f];
-		char *filename[2] = { string_format("%s.dat", outfield), string_format("%s_perunit.dat", outfield) };
-		FILE *out;
-		for ( int i=0; i<2; ++i ) {
-			// Create a file for each output field
-			out = open_category_file(category, SUBDIR_DATA, filename[i]);
-			free(filename[i]);
-			hash_table_insert(output_file[i], outfield, out);
-			fprintf(out, OUTPUT_COMMENT "%s summaries mean stddev whisker_low Q1 median Q3 whisker_high\n", cmdline.split_field);
+/* 	for ( int f=0; f < cmdline.num_fields; ++f ) { */
+/* 		char *outfield = cmdline.fields[f]; */
+/* 		char *filename[2] = { string_format("%s.dat", outfield), string_format("%s_perunit.dat", outfield) }; */
+/* 		FILE *out; */
+/* 		for ( int i=0; i<2; ++i ) { */
+/* 			// Create a file for each output field */
+/* 			out = open_category_file(category, SUBDIR_DATA, filename[i]); */
+/* 			free(filename[i]); */
+/* 			hash_table_insert(output_file[i], outfield, out); */
+/* 			fprintf(out, OUTPUT_COMMENT "%s summaries mean stddev whisker_low Q1 median Q3 whisker_high\n", cmdline.split_field); */
 
-			// Initialize stats on each output field's values
-			struct stats *stat = xxmalloc(sizeof(*stat));
-			stats_init(stat);
-			hash_table_insert(stats[i], outfield, stat);
+/* 			// Initialize stats on each output field's values */
+/* 			struct stats *stat = xxmalloc(sizeof(*stat)); */
+/* 			stats_init(stat); */
+/* 			hash_table_insert(stats[i], outfield, stat); */
 			
-			// Initialize stats for all data
-			stat = xxmalloc(sizeof(*stat));
-			stats_init(stat);
-			hash_table_insert(all_stats[i], outfield, stat);
-		}
-	}
+/* 			// Initialize stats for all data */
+/* 			stat = xxmalloc(sizeof(*stat)); */
+/* 			stats_init(stat); */
+/* 			hash_table_insert(all_stats[i], outfield, stat); */
+/* 		} */
+/* 	} */
 
-	// Build array of keys and sort them
-	int num_splits = hash_table_size(grouping);
-	char **keys_sorted = xxmalloc(num_splits*sizeof(*keys_sorted));
-	struct hash_table *value_list;
-	char *split_key;
-	struct list *split_list;
-	struct record *item;
-	hash_table_firstkey(grouping);
-	for ( int group=0; hash_table_nextkey(grouping, &split_key, (void **)&value_list) != 0; ) {
-		keys_sorted[group++] = split_key;
-	}
-	qsort(keys_sorted, num_splits, sizeof(*keys_sorted), string_compare);
+/* 	// Build array of keys and sort them */
+/* 	int num_splits = hash_table_size(grouping); */
+/* 	char **keys_sorted = xxmalloc(num_splits*sizeof(*keys_sorted)); */
+/* 	struct hash_table *value_list; */
+/* 	char *split_key; */
+/* 	struct list *split_list; */
+/* 	struct record *item; */
+/* 	hash_table_firstkey(grouping); */
+/* 	for ( int group=0; hash_table_nextkey(grouping, &split_key, (void **)&value_list) != 0; ) { */
+/* 		keys_sorted[group++] = split_key; */
+/* 	} */
+/* 	qsort(keys_sorted, num_splits, sizeof(*keys_sorted), string_compare); */
 
-	// First, iterate through all data to obtain full data range (min and max)
-	for ( int group_num=0; group_num < num_splits; ++group_num ) {
-		struct list *split_list = hash_table_lookup(grouping, keys_sorted[group_num]);
-		list_first_item(split_list);
-		while ( (item = list_next_item(split_list)) != 0 ) {
-			for ( int f=0; f < cmdline.num_fields; ++f ) {
-				double value;
-				if ( !get_json_value(item, cmdline.fields[f], NULL, &value) )
-					continue;
-				stats_insert(hash_table_lookup(all_stats[0], cmdline.fields[f]), value);
-				stats_insert(hash_table_lookup(all_stats[1], cmdline.fields[f]), value / item->work_units_processed);
-			}
-		}
-	}
+/* 	struct mordor *m = mordor_create(); // */
 
-	// Calculate bucket sizes based on cumulative stats (data ranges)
-	for ( int f=0; f < cmdline.num_fields; ++f ) {
-		double *bucket_size;
-		for ( int i=0; i<2; ++i ) {
-			struct stats *stat = hash_table_lookup(all_stats[i], cmdline.fields[f]);
-			bucket_size = xxmalloc(sizeof(*bucket_size));
-			*bucket_size = stats_ideal_bucket_size(stat);
-			hash_table_insert(bucket_sizes[i], cmdline.fields[f], bucket_size);
-		}
-	}
+/* 	// First, iterate through all data to obtain full data range (min and max) */
+/* 	for ( int group_num=0; group_num < num_splits; ++group_num ) { */
+/* 		struct list *split_list = hash_table_lookup(grouping, keys_sorted[group_num]); */
+/* 		list_first_item(split_list); */
+/* 		while ( (item = list_next_item(split_list)) != 0 ) { */
+/* 			double value; // */
+/* 			if (!get_json_value(item, cmdline.fields[0], units_of_measure, &value)) value = NAN; // */
+/* 			mordor_insert(m, keys_sorted[group_num], value); */
+/* 			/\* for ( int f=0; f < cmdline.num_fields; ++f ) { *\/ */
+/* 			/\* 	double value; *\/ */
+/* 			/\* 	if ( !get_json_value(item, cmdline.fields[f], NULL, &value) ) *\/ */
+/* 			/\* 		continue; *\/ */
+/* 			/\* 	stats_insert(hash_table_lookup(all_stats[0], cmdline.fields[f]), value); *\/ */
+/* 			/\* 	stats_insert(hash_table_lookup(all_stats[1], cmdline.fields[f]), value / item->work_units_processed); *\/ */
+/* 			/\* } *\/ */
+/* 		} */
+/* 	} */
 
-	// Print cumulative histogram of all stats
-	write_histograms_files(all_stats, bucket_sizes, ALLSTATS_NAME, category);
+/* 	char *pretty_field = presentation_string(cmdline.fields[0]); */
+/* 	m->xlabel = string_format("%s (%s)", pretty_field, (char *)hash_table_lookup(units_of_measure, cmdline.fields[0])); */
+/* 	mordor_plot(m, "test.dat", "test.gp"); // */
+/* 	free(pretty_field); */
+/* 	free(m->xlabel); */
+/* 	mordor_delete(m); // */
+/* 	exit(EXIT_SUCCESS);  // */
 
-	// Iterate through split keys in sorted order
-	for ( int group=0; group < num_splits; ++group ) {
-		split_key = keys_sorted[group];
-		split_list = hash_table_lookup(grouping, split_key);
+/* 	// Calculate bucket sizes based on cumulative stats (data ranges) */
+/* 	for ( int f=0; f < cmdline.num_fields; ++f ) { */
+/* 		double *bucket_size; */
+/* 		for ( int i=0; i<2; ++i ) { */
+/* 			struct stats *stat = hash_table_lookup(all_stats[i], cmdline.fields[f]); */
+/* 			bucket_size = xxmalloc(sizeof(*bucket_size)); */
+/* 			*bucket_size = stats_ideal_bucket_size(stat); */
+/* 			hash_table_insert(bucket_sizes[i], cmdline.fields[f], bucket_size); */
+/* 		} */
+/* 	} */
 
-		// Create file in which to dump values read
-		char *this_filename = string_format("%s.dat", split_key);
-		FILE *this_match_file = open_category_file(category, SUBDIR_DATA, this_filename);
-		free(this_filename);
+/* 	// Print cumulative histogram of all stats */
+/* 	write_histograms_files(all_stats, bucket_sizes, ALLSTATS_NAME, category); */
 
-		// Read values, iterating through items of split_list
-		for ( list_first_item(split_list); (item = list_next_item(split_list)) != 0; ) {
-			// Work units for this task
-			fprintf(this_match_file,  "%d" OUTPUT_FIELD_SEPARATOR "%d", item->work_units_processed, item->work_units_total);
+/* 	// Iterate through split keys in sorted order */
+/* 	for ( int group=0; group < num_splits; ++group ) { */
+/* 		split_key = keys_sorted[group]; */
+/* 		split_list = hash_table_lookup(grouping, split_key); */
 
-			// Lookup value for each output field
-			for ( int f=0; f < cmdline.num_fields; ++f ) {
-				double value;
-				if ( !get_json_value(item, cmdline.fields[f], units_of_measure, &value) ) {
-					fprintf(this_match_file, OUTPUT_FIELD_SEPARATOR "" OUTPUT_PLACEHOLDER);
-					continue;
-				}
-				fprintf(this_match_file, OUTPUT_FIELD_SEPARATOR "%g", value);
+/* 		// Create file in which to dump values read */
+/* 		char *this_filename = string_format("%s.dat", split_key); */
+/* 		FILE *this_match_file = open_category_file(category, SUBDIR_DATA, this_filename); */
+/* 		free(this_filename); */
 
-				// Insert to this split_list's stats
-				stats_insert(hash_table_lookup(stats[0], cmdline.fields[f]), value);
-				stats_insert(hash_table_lookup(stats[1], cmdline.fields[f]), value / item->work_units_processed);
-			}
-			fprintf(this_match_file, OUTPUT_RECORD_SEPARATOR);
-		}
-		fclose(this_match_file);
+/* 		// Read values, iterating through items of split_list */
+/* 		for ( list_first_item(split_list); (item = list_next_item(split_list)) != 0; ) { */
+/* 			// Work units for this task */
+/* 			fprintf(this_match_file,  "%d" OUTPUT_FIELD_SEPARATOR "%d", item->work_units_processed, item->work_units_total); */
 
-		// Print histogram
-		write_histograms_files(stats, bucket_sizes, split_key, category);
+/* 			// Lookup value for each output field */
+/* 			for ( int f=0; f < cmdline.num_fields; ++f ) { */
+/* 				double value; */
+/* 				if ( !get_json_value(item, cmdline.fields[f], units_of_measure, &value) ) { */
+/* 					fprintf(this_match_file, OUTPUT_FIELD_SEPARATOR "" OUTPUT_PLACEHOLDER); */
+/* 					continue; */
+/* 				} */
+/* 				fprintf(this_match_file, OUTPUT_FIELD_SEPARATOR "%g", value); */
 
-		// Print averages
-		for ( int i=0; i < 2; ++i ) {
-			for ( int f=0; f < cmdline.num_fields; ++f ) {
-				// Each output field's aggregated data goes to a separate file
-				FILE *out = hash_table_lookup(output_file[i], cmdline.fields[f]);
+/* 				// Insert to this split_list's stats */
+/* 				stats_insert(hash_table_lookup(stats[0], cmdline.fields[f]), value); */
+/* 				stats_insert(hash_table_lookup(stats[1], cmdline.fields[f]), value / item->work_units_processed); */
+/* 			} */
+/* 			fprintf(this_match_file, OUTPUT_RECORD_SEPARATOR); */
+/* 		} */
+/* 		fclose(this_match_file); */
 
-				// Print matching field (split_key) and number of matches
-				fprintf(out, "%s", split_key);
-				fprintf(out, OUTPUT_FIELD_SEPARATOR "%d", list_size(split_list));
+/* 		// Print histogram */
+/* 		write_histograms_files(stats, bucket_sizes, split_key, category); */
 
-				// Print statistics
-				struct stats *stat = hash_table_lookup(stats[i], cmdline.fields[f]);
-				fprintf(out, OUTPUT_FIELD_SEPARATOR "%g", stats_mean(stat));
-				fprintf(out, OUTPUT_FIELD_SEPARATOR "%g", stats_stddev(stat));
-				fprintf(out, OUTPUT_FIELD_SEPARATOR "%g", stats_whisker_low(stat));
-				fprintf(out, OUTPUT_FIELD_SEPARATOR "%g", stats_Q1(stat));
-				fprintf(out, OUTPUT_FIELD_SEPARATOR "%g", stats_median(stat));
-				fprintf(out, OUTPUT_FIELD_SEPARATOR "%g", stats_Q3(stat));
-				fprintf(out, OUTPUT_FIELD_SEPARATOR "%g", stats_whisker_high(stat));
-				fprintf(out, OUTPUT_RECORD_SEPARATOR);
+/* 		// Print averages */
+/* 		for ( int i=0; i < 2; ++i ) { */
+/* 			for ( int f=0; f < cmdline.num_fields; ++f ) { */
+/* 				// Each output field's aggregated data goes to a separate file */
+/* 				FILE *out = hash_table_lookup(output_file[i], cmdline.fields[f]); */
 
-				// Re-initialize to zero for next iteration
-				stats_reset(stat);
-			}
-		}
-	}  // each split_key
+/* 				// Print matching field (split_key) and number of matches */
+/* 				fprintf(out, "%s", split_key); */
+/* 				fprintf(out, OUTPUT_FIELD_SEPARATOR "%d", list_size(split_list)); */
 
-	// Clean up
-	free(keys_sorted);
-	for ( int i=0; i<2; ++i ) {
-		for ( int f=0; f < cmdline.num_fields; ++f ) {
-			fclose(hash_table_lookup(output_file[i], cmdline.fields[f]));
-			free(hash_table_lookup(stats[i], cmdline.fields[f]));
-		}
-		hash_table_delete(output_file[i]);
-		hash_table_delete(stats[i]);
-	}
-}
+/* 				// Print statistics */
+/* 				struct stats *stat = hash_table_lookup(stats[i], cmdline.fields[f]); */
+/* 				fprintf(out, OUTPUT_FIELD_SEPARATOR "%g", stats_mean(stat)); */
+/* 				fprintf(out, OUTPUT_FIELD_SEPARATOR "%g", stats_stddev(stat)); */
+/* 				fprintf(out, OUTPUT_FIELD_SEPARATOR "%g", stats_whisker_low(stat)); */
+/* 				fprintf(out, OUTPUT_FIELD_SEPARATOR "%g", stats_Q1(stat)); */
+/* 				fprintf(out, OUTPUT_FIELD_SEPARATOR "%g", stats_median(stat)); */
+/* 				fprintf(out, OUTPUT_FIELD_SEPARATOR "%g", stats_Q3(stat)); */
+/* 				fprintf(out, OUTPUT_FIELD_SEPARATOR "%g", stats_whisker_high(stat)); */
+/* 				fprintf(out, OUTPUT_RECORD_SEPARATOR); */
 
-// Writes the gnuplot script for one specific output field
-static void plotscript_boxplot_outfield(FILE *f, const char *outfield, struct hash_table *units_of_measure) {
-	char *pretty_outfield = presentation_string(outfield);
-	char *pretty_splitfield = presentation_string(cmdline.split_field);
-	char *basename = string_format("%s.dat", outfield);
-	char *data_filename = string_format("%s%s%s", SUBDIR_DATA, SUBDIR_DATA[0] != '\0' ? "/" : "", basename);
-	free(basename);
+/* 				// Re-initialize to zero for next iteration */
+/* 				stats_reset(stat); */
+/* 			} */
+/* 		} */
+/* 	}  // each split_key */
 
-	fprintf(f, "\n# %s\n", outfield);
-	fprintf(f, "set output '%s-boxplot.png'\n", outfield);
-	fprintf(f, "set title '{/=16 %s vs. %s'.title_suffix.'}'\n", pretty_outfield, pretty_splitfield);
+/* 	// Clean up */
+/* 	free(keys_sorted); */
+/* 	for ( int i=0; i<2; ++i ) { */
+/* 		for ( int f=0; f < cmdline.num_fields; ++f ) { */
+/* 			fclose(hash_table_lookup(output_file[i], cmdline.fields[f])); */
+/* 			free(hash_table_lookup(stats[i], cmdline.fields[f])); */
+/* 		} */
+/* 		hash_table_delete(output_file[i]); */
+/* 		hash_table_delete(stats[i]); */
+/* 	} */
+/* } */
 
-	// Reduce the number of xtic labels
-	fprintf(f, "xskip = 1; n = system(\"wc -l %s\")\n", data_filename);
-	fprintf(f, "if (n > " TO_STR(GNUPLOT_SOFTMAX_XLABELS) ") xskip = int(n/" TO_STR(GNUPLOT_SOFTMAX_XLABELS) ")\n");
+/* // Writes the gnuplot script for one specific output field */
+/* static void plotscript_boxplot_outfield(FILE *f, const char *outfield, struct hash_table *units_of_measure) { */
+/* 	char *pretty_outfield = presentation_string(outfield); */
+/* 	char *pretty_splitfield = presentation_string(cmdline.split_field); */
+/* 	char *basename = string_format("%s.dat", outfield); */
+/* 	char *data_filename = string_format("%s%s%s", SUBDIR_DATA, SUBDIR_DATA[0] != '\0' ? "/" : "", basename); */
+/* 	free(basename); */
 
-	// Determine unit of measure
-	char *unit = hash_table_lookup(units_of_measure, outfield);
-	char *gnuplot_unit_conversion = "";
+/* 	fprintf(f, "\n# %s\n", outfield); */
+/* 	fprintf(f, "set output '%s-boxplot.png'\n", outfield); */
+/* 	fprintf(f, "set title '{/=16 %s vs. %s'.title_suffix.'}'\n", pretty_outfield, pretty_splitfield); */
 
-	// Convert seconds to hours
-	if ( unit != NULL && strcmp(unit, "s") == 0 ) {
-		unit = "hr";
-		gnuplot_unit_conversion = "/3600";
-	}
+/* 	// Reduce the number of xtic labels */
+/* 	fprintf(f, "xskip = 1; n = system(\"wc -l %s\")\n", data_filename); */
+/* 	fprintf(f, "if (n > " TO_STR(GNUPLOT_SOFTMAX_XLABELS) ") xskip = int(n/" TO_STR(GNUPLOT_SOFTMAX_XLABELS) ")\n"); */
 
-	// Output field with unit
-	fprintf(f, "set ylabel '{/=14 %s", pretty_outfield);
-	if ( unit != NULL ) {
-		fprintf(f, " (%s)", unit);
-	}
-	fprintf(f, "}'\n");
+/* 	// Determine unit of measure */
+/* 	char *unit = hash_table_lookup(units_of_measure, outfield); */
+/* 	char *gnuplot_unit_conversion = ""; */
 
-	// Mean as dot and stddev as error bars
-	//fprintf(f, "plot '%s' u 0:3:xticlabels(strcol(1)) w points pt 7 lc rgb 'black', \\\n\t'' u 0:3:4 with yerrorbars ls 1\n", data_filename);
+/* 	// Convert seconds to hours */
+/* 	if ( unit != NULL && strcmp(unit, "s") == 0 ) { */
+/* 		unit = "hr"; */
+/* 		gnuplot_unit_conversion = "/3600"; */
+/* 	} */
 
-	// Boxplots
-	fprintf(f, "set boxwidth 0.5 absolute\n");
-	fprintf(f, "plot \"<sed 's/\\.crc\\.nd\\.edu//' %1$s\" u 0:($6%2$s):($5%2$s):($9%2$s):($8%2$s):xticlabels(int(column(0))%%xskip==0?strcol(1):'') w candlesticks ls 2, \\\n"
-	           "\t'' u 0:($7%2$s):($7%2$s):($7%2$s):($7%2$s) w candlesticks ls 1 lw 2\n", data_filename, gnuplot_unit_conversion);
+/* 	// Output field with unit */
+/* 	fprintf(f, "set ylabel '{/=14 %s", pretty_outfield); */
+/* 	if ( unit != NULL ) { */
+/* 		fprintf(f, " (%s)", unit); */
+/* 	} */
+/* 	fprintf(f, "}'\n"); */
 
-	free(pretty_outfield);
-	free(pretty_splitfield);
-	free(data_filename);
-}
+/* 	// Mean as dot and stddev as error bars */
+/* 	//fprintf(f, "plot '%s' u 0:3:xticlabels(strcol(1)) w points pt 7 lc rgb 'black', \\\n\t'' u 0:3:4 with yerrorbars ls 1\n", data_filename); */
 
-int write_plotscript_boxplot(struct hash_table *grouping, const char *category, struct hash_table *units_of_measure) {
-	// Find ways to give up
-	if ( hash_table_size(grouping) == 0 )
-		return 0;
-	if ( category == NULL || category[0] == '\0' ) {
-		warn(D_RMON, "No category given or empty string.");
-		return 0;
-	}
+/* 	// Boxplots */
+/* 	fprintf(f, "set boxwidth 0.5 absolute\n"); */
+/* 	fprintf(f, "plot \"<sed 's/\\.crc\\.nd\\.edu//' %1$s\" u 0:($6%2$s):($5%2$s):($9%2$s):($8%2$s):xticlabels(int(column(0))%%xskip==0?strcol(1):'') w candlesticks ls 2, \\\n" */
+/* 	           "\t'' u 0:($7%2$s):($7%2$s):($7%2$s):($7%2$s) w candlesticks ls 1 lw 2\n", data_filename, gnuplot_unit_conversion); */
 
-	// Tally total number of summaries
-	long num_summaries = 0;
-	char *split_key;
-	struct list *split_list;
-	hash_table_firstkey(grouping);
-	while ( hash_table_nextkey(grouping, &split_key, (void **)&split_list) != 0 ) {
-		num_summaries += list_size(split_list);
-	}
+/* 	free(pretty_outfield); */
+/* 	free(pretty_splitfield); */
+/* 	free(data_filename); */
+/* } */
 
-	FILE *gnuplot_script = open_category_file(category, SUBDIR_PLOT, GNUPLOT_BOXPLOT_FILENAME);
-	fprintf(gnuplot_script, "set terminal pngcairo enhanced color size 1072,768\n");
-	fprintf(gnuplot_script, "set key off\n");
-	fprintf(gnuplot_script, "set xtics nomirror rotate by 60 right\n");
-	fprintf(gnuplot_script, "set style line 1 lc rgb 'black'\n");
-	fprintf(gnuplot_script, "set style line 2 lc rgb 'gray50'\n");
-	fprintf(gnuplot_script, "title_suffix = '\t(%ld \"%s\" Summaries)'\n", num_summaries, category);
+/* int write_plotscript_boxplot(struct hash_table *grouping, const char *category, struct hash_table *units_of_measure) { */
+/* 	// Find ways to give up */
+/* 	if ( hash_table_size(grouping) == 0 ) */
+/* 		return 0; */
+/* 	if ( category == NULL || category[0] == '\0' ) { */
+/* 		warn(D_RMON, "No category given or empty string."); */
+/* 		return 0; */
+/* 	} */
 
-	char *pretty_splitfield = presentation_string(cmdline.split_field);
-	fprintf(gnuplot_script, "set xlabel '{/=14 %s  (%d total)}'\n", pretty_splitfield, hash_table_size(grouping));
-	free(pretty_splitfield);
+/* 	// Tally total number of summaries */
+/* 	long num_summaries = 0; */
+/* 	char *split_key; */
+/* 	struct list *split_list; */
+/* 	hash_table_firstkey(grouping); */
+/* 	while ( hash_table_nextkey(grouping, &split_key, (void **)&split_list) != 0 ) { */
+/* 		num_summaries += list_size(split_list); */
+/* 	} */
 
-	for ( int f=0; f < cmdline.num_fields; ++f ) {
-		plotscript_boxplot_outfield(gnuplot_script, cmdline.fields[f], units_of_measure);
-	}
-	return 1;
-}
+/* 	FILE *gnuplot_script = open_category_file(category, SUBDIR_PLOT, GNUPLOT_BOXPLOT_FILENAME); */
+/* 	fprintf(gnuplot_script, "set terminal pngcairo enhanced color size 1072,768\n"); */
+/* 	fprintf(gnuplot_script, "set key off\n"); */
+/* 	fprintf(gnuplot_script, "set xtics nomirror rotate by 60 right\n"); */
+/* 	fprintf(gnuplot_script, "set style line 1 lc rgb 'black'\n"); */
+/* 	fprintf(gnuplot_script, "set style line 2 lc rgb 'gray50'\n"); */
+/* 	fprintf(gnuplot_script, "title_suffix = '\t(%ld \"%s\" Summaries)'\n", num_summaries, category); */
 
-// Writes the gnuplot script for one specific output field
-static void plotscript_histogram_outfield(FILE *f, const char *outfield, int col, struct hash_table *units_of_measure, struct hash_table *bucket_sizes[2]) {
-	char *pretty_outfield = presentation_string(outfield);
-	char *pretty_splitfield = presentation_string(cmdline.split_field);
-	char *data_filename[2] = {
-		string_format("%s%s%s.dat", SUBDIR_DATA, SUBDIR_DATA[0] != '\0' ? "/" : "", outfield),
-		string_format("%s%s%s_perunit.dat", SUBDIR_DATA, SUBDIR_DATA[0] != '\0' ? "/" : "", outfield)
-	};
+/* 	char *pretty_splitfield = presentation_string(cmdline.split_field); */
+/* 	fprintf(gnuplot_script, "set xlabel '{/=14 %s  (%d total)}'\n", pretty_splitfield, hash_table_size(grouping)); */
+/* 	free(pretty_splitfield); */
 
-	for ( int i=0; i<2; ++i ) {
-		// File name suffix
-		const char *filename_suffix;
-		if ( i == 1 ) {
-			filename_suffix = "_perunit";
-		} else {
-			filename_suffix = "";
-		}
+/* 	for ( int f=0; f < cmdline.num_fields; ++f ) { */
+/* 		plotscript_boxplot_outfield(gnuplot_script, cmdline.fields[f], units_of_measure); */
+/* 	} */
+/* 	return 1; */
+/* } */
 
-		// Bucket size
-		double bucket_size = *(double *)hash_table_lookup(bucket_sizes[i], outfield);
+/* // Writes the gnuplot script for one specific output field */
+/* static void plotscript_histogram_outfield(FILE *f, const char *outfield, int col, struct hash_table *units_of_measure, struct hash_table *bucket_sizes[2]) { */
+/* 	char *pretty_outfield = presentation_string(outfield); */
+/* 	char *pretty_splitfield = presentation_string(cmdline.split_field); */
+/* 	char *data_filename[2] = { */
+/* 		string_format("%s%s%s.dat", SUBDIR_DATA, SUBDIR_DATA[0] != '\0' ? "/" : "", outfield), */
+/* 		string_format("%s%s%s_perunit.dat", SUBDIR_DATA, SUBDIR_DATA[0] != '\0' ? "/" : "", outfield) */
+/* 	}; */
 
-		fprintf(f, "\n# %s%s\n", outfield, i==1?" per work unit":"");
-		fprintf(f, "set output '%s%s-hist.png'\n", outfield, filename_suffix);
-		fprintf(f, "splits = system(\"sort -n -k 3 '%s%s%s%s.dat' | sed '1d;s/ .*$//'\")\n", SUBDIR_DATA, (SUBDIR_DATA[0] != '\0' ? "/" : ""), outfield, filename_suffix);
-		fprintf(f, "set multiplot layout 2,1 title '{/=28 %s%s vs. %s'.title_suffix.'}'\n",
-						pretty_outfield, i==1 ? " per Work Unit" : "", pretty_splitfield);
-		//fprintf(f, "tweak(file) = sprintf(\"<awk '$%1$d==\\\"NAN\\\"{next}NR==2{x=$%1$d;y=0}NR>=2{print ($%1$d+x)/2,y;print $%1$d,(y+$%2$d)/2;x=$%1$d;y=$%2$d}END{print x,0}' '%%s'\", file)\n", col, col+1);
-		fprintf(f, "tweak(file) = sprintf(\"<awk '$%1$d==\\\"NAN\\\"{next}NR==2{x=$%1$d-%3$g;y=0}NR>=2{for(;x+%4$g<$%1$d;x+=%3$g){print x,y;y=0}print $%1$d,$%2$d;x=$%1$d+%3$g;y=$%2$d}END{print x,0}' '%%s'\", file)\n", col, col+1, bucket_size, 0.5*(bucket_size));
-		fprintf(f, "yscale = 1\n");
-		fprintf(f, "set style line 1 lc rgb '%s'\n", i==1 ? "#ffcccc" : "grey90");
-		fprintf(f, "set style line 2 lc rgb '%s'\n", i==1 ? "#ffcccc" : "black");
-		fprintf(f, "set style line 3 lc rgb '#880000'\n");
+/* 	for ( int i=0; i<2; ++i ) { */
+/* 		// File name suffix */
+/* 		const char *filename_suffix; */
+/* 		if ( i == 1 ) { */
+/* 			filename_suffix = "_perunit"; */
+/* 		} else { */
+/* 			filename_suffix = ""; */
+/* 		} */
 
-		// Reduce the number of xtic labels
-		fprintf(f, "yskip = 1; n = system(\"wc -l %s\")\n", data_filename[i]);
-		fprintf(f, "if (n > " TO_STR(GNUPLOT_SOFTMAX_XLABELS) ") yskip = int(n/" TO_STR(GNUPLOT_SOFTMAX_XLABELS) ")\n");
+/* 		// Bucket size */
+/* 		double bucket_size = *(double *)hash_table_lookup(bucket_sizes[i], outfield); */
 
-		// Determine unit of measure
-		char *unit = hash_table_lookup(units_of_measure, outfield);
-		char *gnuplot_unit_conversion = "";
+/* 		fprintf(f, "\n# %s%s\n", outfield, i==1?" per work unit":""); */
+/* 		fprintf(f, "set output '%s%s-hist.png'\n", outfield, filename_suffix); */
+/* 		fprintf(f, "splits = system(\"sort -n -k 3 '%s%s%s%s.dat' | sed '1d;s/ .*$//'\")\n", SUBDIR_DATA, (SUBDIR_DATA[0] != '\0' ? "/" : ""), outfield, filename_suffix); */
+/* 		fprintf(f, "set multiplot layout 2,1 title '{/=28 %s%s vs. %s'.title_suffix.'}'\n", */
+/* 						pretty_outfield, i==1 ? " per Work Unit" : "", pretty_splitfield); */
+/* 		//fprintf(f, "tweak(file) = sprintf(\"<awk '$%1$d==\\\"NAN\\\"{next}NR==2{x=$%1$d;y=0}NR>=2{print ($%1$d+x)/2,y;print $%1$d,(y+$%2$d)/2;x=$%1$d;y=$%2$d}END{print x,0}' '%%s'\", file)\n", col, col+1); */
+/* 		fprintf(f, "tweak(file) = sprintf(\"<awk '$%1$d==\\\"NAN\\\"{next}NR==2{x=$%1$d-%3$g;y=0}NR>=2{for(;x+%4$g<$%1$d;x+=%3$g){print x,y;y=0}print $%1$d,$%2$d;x=$%1$d+%3$g;y=$%2$d}END{print x,0}' '%%s'\", file)\n", col, col+1, bucket_size, 0.5*(bucket_size)); */
+/* 		fprintf(f, "yscale = 1\n"); */
+/* 		fprintf(f, "set style line 1 lc rgb '%s'\n", i==1 ? "#ffcccc" : "grey90"); */
+/* 		fprintf(f, "set style line 2 lc rgb '%s'\n", i==1 ? "#ffcccc" : "black"); */
+/* 		fprintf(f, "set style line 3 lc rgb '#880000'\n"); */
 
-		// Convert seconds to hours
-		if ( unit != NULL && strcmp(unit, "s") == 0 ) {
-			unit = "hr";
-			gnuplot_unit_conversion = "/3600";
-		}
+/* 		// Reduce the number of xtic labels */
+/* 		fprintf(f, "yskip = 1; n = system(\"wc -l %s\")\n", data_filename[i]); */
+/* 		fprintf(f, "if (n > " TO_STR(GNUPLOT_SOFTMAX_XLABELS) ") yskip = int(n/" TO_STR(GNUPLOT_SOFTMAX_XLABELS) ")\n"); */
 
-		// Top plot (cumulative histogram)
-		fprintf(f, "set size 1,0.3\n");
-		fprintf(f, "set origin 0,0.7\n");
-		fprintf(f, "set bmargin 0\n");
-		fprintf(f, "set tmargin 2\n");
-		fprintf(f, "unset xlabel\n");
-		fprintf(f, "unset ytics\n");
-		fprintf(f, "set format x ''\n");
-		fprintf(f, "set ylabel 'All %ss' font ',20'\n", pretty_splitfield);
-		fprintf(f, "set yrange [0:]\n");
-		fprintf(f, "plot tweak('%s%s" ALLSTATS_NAME "%s.hist') using ($1%s):(yscale*$2) with filledcurves ls %d notitle\n\n",
-						SUBDIR_DATA, (SUBDIR_DATA[0] != '\0' ? "/" : ""), filename_suffix, gnuplot_unit_conversion, i==1 ? 3 : 2);
+/* 		// Determine unit of measure */
+/* 		char *unit = hash_table_lookup(units_of_measure, outfield); */
+/* 		char *gnuplot_unit_conversion = ""; */
 
-		// Bottom plot (decomposed by split field)
-		fprintf(f, "set size 1,0.7\n");
-		fprintf(f, "set origin 0,0\n");
-		fprintf(f, "set bmargin 3.5\n");
-		fprintf(f, "set tmargin 0\n");
-		fprintf(f, "set format x '%%g'\n");
-		fprintf(f, "set xlabel '{/=20 %s", pretty_outfield);
-		if ( unit ) fprintf(f, " (%s%s)", unit, i==1 ? "/unit" : "");
-		fprintf(f, "}'\n");
-		fprintf(f, "unset ylabel\n");
-		fprintf(f, "set format y ''\n");
-		fprintf(f, "do for [i=1:(words(splits))] {\n");
-		fprintf(f, "  lbl = system(\"echo \".word(splits, i).\" | sed 's/\\.crc\\.nd\\.edu//;s/\\.nd\\.edu//'\")\n");
-		fprintf(f, "  if ( i %% yskip == 0 ) { set ytics add ( (lbl) (-vspread*i) ) }\n");
-		fprintf(f, "}\n");
-		fprintf(f, "set ytics font \",12\"\n");
-		fprintf(f, "set yrange [-vspread*(1.05*words(splits)):]\n");
-		fprintf(f, "plot for [i=1:(words(splits))] (tweak('%s%s'.word(splits, i).'%s.hist')) using ($1%s):(yscale*$2 - vspread*i) with filledcurves ls 1 notitle\n\n",
-						SUBDIR_DATA, (SUBDIR_DATA[0] != '\0' ? "/" : ""), filename_suffix, gnuplot_unit_conversion);
-		fprintf(f, "unset multiplot\n");
+/* 		// Convert seconds to hours */
+/* 		if ( unit != NULL && strcmp(unit, "s") == 0 ) { */
+/* 			unit = "hr"; */
+/* 			gnuplot_unit_conversion = "/3600"; */
+/* 		} */
 
-		free(data_filename[i]);
-	}
-	free(pretty_outfield);
-	free(pretty_splitfield);
-}
+/* 		// Top plot (cumulative histogram) */
+/* 		fprintf(f, "set size 1,0.3\n"); */
+/* 		fprintf(f, "set origin 0,0.7\n"); */
+/* 		fprintf(f, "set bmargin 0\n"); */
+/* 		fprintf(f, "set tmargin 2\n"); */
+/* 		fprintf(f, "unset xlabel\n"); */
+/* 		fprintf(f, "unset ytics\n"); */
+/* 		fprintf(f, "set format x ''\n"); */
+/* 		fprintf(f, "set ylabel 'All %ss' font ',20'\n", pretty_splitfield); */
+/* 		fprintf(f, "set yrange [0:]\n"); */
+/* 		fprintf(f, "plot tweak('%s%s" ALLSTATS_NAME "%s.hist') using ($1%s):(yscale*$2) with filledcurves ls %d notitle\n\n", */
+/* 						SUBDIR_DATA, (SUBDIR_DATA[0] != '\0' ? "/" : ""), filename_suffix, gnuplot_unit_conversion, i==1 ? 3 : 2); */
 
-int write_plotscript_histogram(struct hash_table *grouping, const char *category, struct hash_table *units_of_measure, struct hash_table *bucket_sizes[2]) {
-	// Find ways to give up
-	if ( hash_table_size(grouping) == 0 )
-		return 0;
-	if ( category == NULL || category[0] == '\0' ) {
-		warn(D_RMON, "No category given or empty string.");
-		return 0;
-	}
+/* 		// Bottom plot (decomposed by split field) */
+/* 		fprintf(f, "set size 1,0.7\n"); */
+/* 		fprintf(f, "set origin 0,0\n"); */
+/* 		fprintf(f, "set bmargin 3.5\n"); */
+/* 		fprintf(f, "set tmargin 0\n"); */
+/* 		fprintf(f, "set format x '%%g'\n"); */
+/* 		fprintf(f, "set xlabel '{/=20 %s", pretty_outfield); */
+/* 		if ( unit ) fprintf(f, " (%s%s)", unit, i==1 ? "/unit" : ""); */
+/* 		fprintf(f, "}'\n"); */
+/* 		fprintf(f, "unset ylabel\n"); */
+/* 		fprintf(f, "set format y ''\n"); */
+/* 		fprintf(f, "do for [i=1:(words(splits))] {\n"); */
+/* 		fprintf(f, "  lbl = system(\"echo \".word(splits, i).\" | sed 's/\\.crc\\.nd\\.edu//;s/\\.nd\\.edu//'\")\n"); */
+/* 		fprintf(f, "  if ( i %% yskip == 0 ) { set ytics add ( (lbl) (-vspread*i) ) }\n"); */
+/* 		fprintf(f, "}\n"); */
+/* 		fprintf(f, "set ytics font \",12\"\n"); */
+/* 		fprintf(f, "set yrange [-vspread*(1.05*words(splits)):]\n"); */
+/* 		fprintf(f, "plot for [i=1:(words(splits))] (tweak('%s%s'.word(splits, i).'%s.hist')) using ($1%s):(yscale*$2 - vspread*i) with filledcurves ls 1 notitle\n\n", */
+/* 						SUBDIR_DATA, (SUBDIR_DATA[0] != '\0' ? "/" : ""), filename_suffix, gnuplot_unit_conversion); */
+/* 		fprintf(f, "unset multiplot\n"); */
 
-	// Tally total number of summaries
-	long num_summaries = 0;
-	char *split_key;
-	struct list *split_list;
-	hash_table_firstkey(grouping);
-	while ( hash_table_nextkey(grouping, &split_key, (void **)&split_list) != 0 ) {
-		num_summaries += list_size(split_list);
-	}
+/* 		free(data_filename[i]); */
+/* 	} */
+/* 	free(pretty_outfield); */
+/* 	free(pretty_splitfield); */
+/* } */
 
-	FILE *gnuplot_script = open_category_file(category, SUBDIR_PLOT, GNUPLOT_HISTOGRAM_FILENAME);
-	fprintf(gnuplot_script, "set terminal pngcairo enhanced size 1280,2048\n");//640,1024
-	fprintf(gnuplot_script, "set key off\n");
-	fprintf(gnuplot_script, "set style fill transparent solid 0.9 border lc rgb 'black'\n");
-	fprintf(gnuplot_script, "title_suffix = '    (%ld \"%s\" Summaries)'\n", num_summaries, category);
-	fprintf(gnuplot_script, "vspread = 1.5\n");
-	fprintf(gnuplot_script, "set lmargin at screen 0.18\n");
-	fprintf(gnuplot_script, "set grid xtics\n");
-	fprintf(gnuplot_script, "set grid\n");
-	fprintf(gnuplot_script, "set xtics font ',20'\n");
+/* int write_plotscript_histogram(struct hash_table *grouping, const char *category, struct hash_table *units_of_measure, struct hash_table *bucket_sizes[2]) { */
+/* 	// Find ways to give up */
+/* 	if ( hash_table_size(grouping) == 0 ) */
+/* 		return 0; */
+/* 	if ( category == NULL || category[0] == '\0' ) { */
+/* 		warn(D_RMON, "No category given or empty string."); */
+/* 		return 0; */
+/* 	} */
 
-	for ( int f=0, col=1; f < cmdline.num_fields; ++f, col += 2 ) {
-		plotscript_histogram_outfield(gnuplot_script, cmdline.fields[f], col, units_of_measure, bucket_sizes);
-	}
-	return 1;
-}
+/* 	// Tally total number of summaries */
+/* 	long num_summaries = 0; */
+/* 	char *split_key; */
+/* 	struct list *split_list; */
+/* 	hash_table_firstkey(grouping); */
+/* 	while ( hash_table_nextkey(grouping, &split_key, (void **)&split_list) != 0 ) { */
+/* 		num_summaries += list_size(split_list); */
+/* 	} */
 
-void plot_category(struct hash_table *grouping, const char *category, struct hash_table *units_of_measure, struct hash_table *bucket_sizes[2]) {
-	if ( !write_plotscript_boxplot(grouping, category, units_of_measure) )
-		return;
-	if ( !write_plotscript_histogram(grouping, category, units_of_measure, bucket_sizes) )
-		return;
+/* 	FILE *gnuplot_script = open_category_file(category, SUBDIR_PLOT, GNUPLOT_HISTOGRAM_FILENAME); */
+/* 	fprintf(gnuplot_script, "set terminal pngcairo enhanced size 1280,2048\n");//640,1024 */
+/* 	fprintf(gnuplot_script, "set key off\n"); */
+/* 	fprintf(gnuplot_script, "set style fill transparent solid 0.9 border lc rgb 'black'\n"); */
+/* 	fprintf(gnuplot_script, "title_suffix = '    (%ld \"%s\" Summaries)'\n", num_summaries, category); */
+/* 	fprintf(gnuplot_script, "vspread = 1.5\n"); */
+/* 	fprintf(gnuplot_script, "set lmargin at screen 0.18\n"); */
+/* 	fprintf(gnuplot_script, "set grid xtics\n"); */
+/* 	fprintf(gnuplot_script, "set grid\n"); */
+/* 	fprintf(gnuplot_script, "set xtics font ',20'\n"); */
 
-	/* printf("Plotting category \"%s\"\n", category); */
-	/* errno = 0; */
-	/* pid_t pid; */
-	/* if ( (pid = fork()) < 0 ) { // error */
-	/* 	fatal("Cannot fork process: %s", strerror(errno)); */
-	/* } else if ( pid > 0 ) { // child */
-	/* 	// Change to directory where category stuff goes */
-	/* 	char *dir = category_directory(category, ""); */
-	/* 	if ( chdir(dir) != 0 ) */
-	/* 		fatal("Cannot change directory to \"%s\".", dir); */
-	/* 	free(dir); */
+/* 	for ( int f=0, col=1; f < cmdline.num_fields; ++f, col += 2 ) { */
+/* 		plotscript_histogram_outfield(gnuplot_script, cmdline.fields[f], col, units_of_measure, bucket_sizes); */
+/* 	} */
+/* 	return 1; */
+/* } */
 
-	/* 	// Invoke gnuplot */
-	/* 	errno = 0; */
-	/* 	printf("%s %s\n", GNUPLOT_BINARY, GNUPLOT_SCRIPT_FILENAME); */
-	/* 	execlp(GNUPLOT_BINARY, GNUPLOT_BINARY, GNUPLOT_SCRIPT_FILENAME, (char *)NULL); */
-	/* 	fatal("Error executing plotter: %s", strerror(errno)); */
-	/* 	exit(EXIT_FAILURE); */
-	/* } else { // parent */
-	/* 	int status; */
-	/* 	waitpid(pid, &status, 0); */
-	/* 	if ( WIFEXITED(status) ) { */
-	/* 		if ( WEXITSTATUS(status) != EXIT_SUCCESS ) { */
-	/* 			warn(D_RMON, "Child exited with status %d", WEXITSTATUS(status)); */
-	/* 		} */
-	/* 	} else { */
-	/* 		warn(D_RMON, "Child exited abnormally."); */
-	/* 	} */
-	/* } */
-}
+/* void plot_category(struct hash_table *grouping, const char *category, struct hash_table *units_of_measure, struct hash_table *bucket_sizes[2]) { */
+/* 	if ( !write_plotscript_boxplot(grouping, category, units_of_measure) ) */
+/* 		return; */
+/* 	if ( !write_plotscript_histogram(grouping, category, units_of_measure, bucket_sizes) ) */
+/* 		return; */
+
+/* 	/\* printf("Plotting category \"%s\"\n", category); *\/ */
+/* 	/\* errno = 0; *\/ */
+/* 	/\* pid_t pid; *\/ */
+/* 	/\* if ( (pid = fork()) < 0 ) { // error *\/ */
+/* 	/\* 	fatal("Cannot fork process: %s", strerror(errno)); *\/ */
+/* 	/\* } else if ( pid > 0 ) { // child *\/ */
+/* 	/\* 	// Change to directory where category stuff goes *\/ */
+/* 	/\* 	char *dir = category_directory(category, ""); *\/ */
+/* 	/\* 	if ( chdir(dir) != 0 ) *\/ */
+/* 	/\* 		fatal("Cannot change directory to \"%s\".", dir); *\/ */
+/* 	/\* 	free(dir); *\/ */
+
+/* 	/\* 	// Invoke gnuplot *\/ */
+/* 	/\* 	errno = 0; *\/ */
+/* 	/\* 	printf("%s %s\n", GNUPLOT_BINARY, GNUPLOT_SCRIPT_FILENAME); *\/ */
+/* 	/\* 	execlp(GNUPLOT_BINARY, GNUPLOT_BINARY, GNUPLOT_SCRIPT_FILENAME, (char *)NULL); *\/ */
+/* 	/\* 	fatal("Error executing plotter: %s", strerror(errno)); *\/ */
+/* 	/\* 	exit(EXIT_FAILURE); *\/ */
+/* 	/\* } else { // parent *\/ */
+/* 	/\* 	int status; *\/ */
+/* 	/\* 	waitpid(pid, &status, 0); *\/ */
+/* 	/\* 	if ( WIFEXITED(status) ) { *\/ */
+/* 	/\* 		if ( WEXITSTATUS(status) != EXIT_SUCCESS ) { *\/ */
+/* 	/\* 			warn(D_RMON, "Child exited with status %d", WEXITSTATUS(status)); *\/ */
+/* 	/\* 		} *\/ */
+/* 	/\* 	} else { *\/ */
+/* 	/\* 		warn(D_RMON, "Child exited abnormally."); *\/ */
+/* 	/\* 	} *\/ */
+/* 	/\* } *\/ */
+/* } */
 
 // Queries the database in db_file for the number of work units for
 // tasks in a given list of records.
@@ -1047,6 +1060,133 @@ void query_database_for_list(const char *db_file, struct list *list) {
 	sqlite3_close(db);
 }
 
+static double get_value(struct record *item, const char *field) {
+	static int warned_inconsistent_units = 0;
+	struct jx *jx_value = jx_lookup(item->json, field);
+	if ( jx_value == NULL )
+		return NAN;
+
+	struct jx *jx_unit;
+	if ( jx_value->type == JX_ARRAY ) {
+		// Keep track of the unit of measure
+		if ( units_of_measure != NULL ) {
+			jx_unit = jx_array_index(jx_value, 1);
+			if ( jx_unit != NULL && jx_unit->type == JX_STRING ) {
+				char *previous_unit;
+				if ( (previous_unit = hash_table_lookup(units_of_measure, field)) == NULL ) {
+					hash_table_insert(units_of_measure, field, xxstrdup(jx_unit->u.string_value));
+				} else {
+					if ( strcmp(previous_unit, jx_unit->u.string_value) != 0 && !warned_inconsistent_units ) {
+						warn(D_RMON, "Encountered inconsistent units for \"%s\": \"%s\" and \"%s\".",
+								 field, previous_unit, jx_unit->u.string_value);
+						warned_inconsistent_units = 1;
+					}
+				}
+			}
+		}
+		
+		// First is the value
+		jx_value = jx_array_index(jx_value, 0);
+		if ( jx_value == NULL )
+			return NAN;
+	}
+	if ( jx_value->type == JX_DOUBLE ) {
+		return jx_value->u.double_value;
+	} else if ( jx_value->type == JX_INTEGER ) {
+		return (double)jx_value->u.integer_value;
+	}
+	return NAN; // failure
+}
+
+static double get_value_per_units(struct record *item, const char *field) {
+	return get_value(item, field) / item->work_units_processed;
+}
+
+static double get_value_per_walltime(struct record *item, const char *field) {
+	return get_value(item, field) / get_value(item, FIELD_WALL_TIME);
+}
+
+void plot_histograms(struct hash_table *grouping, char *category) {
+	struct {
+		// Function that returns a measurement, given a record and field
+		double (*lambda)(struct record *, const char *);
+
+		char *title;  // title suffix
+		char *file;  // file name suffix
+		char *unit;  // unit suffix
+		
+		// Mordor histogram plot
+		struct mordor *plot;
+	} histograms[] = {
+//		{ .title = "", .file = "", .unit = "", .lambda = get_value },
+		{ .title = "Per Work Unit", .file = "_per_unit", .unit = "/unit", .lambda = get_value_per_units },
+//		{ .title = "Per Wall Time", .file = "_per_wall_time", .unit = "/s", .lambda = get_value_per_walltime },
+		{ .lambda = NULL }  // null terminator
+	};
+
+	// Create one set of plots for every output field
+	char *pretty_split = presentation_string(cmdline.split_field);
+	for ( int f=0; f < cmdline.num_fields; ++f ) {
+		const char *field = cmdline.fields[f];
+		char *pretty_field = presentation_string(field);
+
+		// Create plots
+		for ( int i=0; histograms[i].lambda; ++i ) {
+			histograms[i].plot = mordor_create();
+		}
+
+		// Feed data
+		struct list *value_list;
+		hash_table_firstkey(grouping);
+		for ( char *key; hash_table_nextkey(grouping, &key, (void **)&value_list); ) {
+			list_first_item(value_list);
+			for ( struct record *item; (item = list_next_item(value_list)) != NULL; ) {
+				for ( int i=0; histograms[i].lambda; ++i ) {
+					mordor_insert(histograms[i].plot, key, (*histograms[i].lambda)(item, field));
+				}
+			}
+		}
+
+		// Plot
+		for ( int i=0; histograms[i].lambda; ++i ) {
+			char *data_name = string_format("%s%s.hist", field, histograms[i].file);
+			char *gnuplot_name = string_format("%s%s.gp", field, histograms[i].file);
+			char *png_name = string_format("%s%s%s%s.png", SUBDIR_PLOT, SUBDIR_PLOT[0] == '\0' ? "" : "/", field, histograms[i].file);
+			char *relative_name = string_format("%s%s%s", SUBDIR_DATA, SUBDIR_DATA[0] == '\0' ? "" : "/", data_name);
+
+			FILE *data = open_category_file(category, SUBDIR_DATA, data_name);
+			FILE *gnuplot = open_category_file(category, SUBDIR_PLOT, gnuplot_name);
+
+			struct mordor *plot = histograms[i].plot;
+			plot->title = string_format("%s %s vs. %s (%ld \"%s\" Tasks)", pretty_field, histograms[i].title, pretty_split, plot->cumulative_stats.count, category);
+			char *unit_str;
+			if ( (unit_str = hash_table_lookup(units_of_measure, field)) == NULL ) {
+				plot->xlabel = string_format("%s", pretty_field);
+			} else {
+				plot->xlabel = string_format("%s (%s)", pretty_field, unit_str);
+			}
+
+			mordor_plot(plot, png_name, data, gnuplot, relative_name);
+
+			free(plot->xlabel);
+			free(plot->title);
+			fclose(gnuplot);
+			fclose(data);
+			free(relative_name);
+			free(png_name);
+			free(gnuplot_name);
+			free(data_name);
+		}
+
+		// Clean up
+		for ( int i=0; histograms[i].lambda; ++i ) {
+			mordor_delete(histograms[i].plot);
+		}
+		free(pretty_field);
+	}
+	free(pretty_split);
+}
+
 int main(int argc, char *argv[]) {
 	debug_config(argv[0]);
 	process_cmdline(argc, argv);
@@ -1064,61 +1204,58 @@ int main(int argc, char *argv[]) {
 		fatal("Input file not specified.");
 	}
 
+	// Query Lobster database if available for more information
+	if ( cmdline.db_file != NULL ) {
+		query_database_for_list(cmdline.db_file, summaries);
+	}
+
 	// Split by category
-	struct hash_table *grouped_by_category = group_by_field(summaries, FIELD_CATEGORY);
+	struct hash_table *hashed_by_category = hash_by_field(summaries, FIELD_CATEGORY);
 
-	// Split by user-specified field
-	char *category;
+	// Track of measure encountered for each field
+	units_of_measure = hash_table_create(0, 0);
+
+	// Split by split_field (e.g. host)
 	struct list *list_in_category;
-	hash_table_firstkey(grouped_by_category);
-	while ( hash_table_nextkey(grouped_by_category, &category, (void **)&list_in_category) ) {
-		// Split category on user's split_field
+	hash_table_firstkey(hashed_by_category);
+	for ( char *category; hash_table_nextkey(hashed_by_category, &category, (void **)&list_in_category); ) {
 		printf("Subdividing category \"%s\"...\n", category);
-		struct hash_table *split_category = group_by_field(list_in_category, cmdline.split_field);
-		filter_by_threshold(split_category, cmdline.threshold);
-		struct hash_table *units_of_measure = hash_table_create(0, 0);
+		struct hash_table *grouping = hash_by_field(list_in_category, cmdline.split_field);
+		filter_by_threshold(grouping, cmdline.threshold);
 
-		// Query Lobster database to get more information
-		struct list *split_list;
-		char *split_field;
-		if ( cmdline.db_file != NULL ) {
-			hash_table_firstkey(split_category);
-			while ( hash_table_nextkey(split_category, &split_field, (void **)&split_list) ) {
-				query_database_for_list(cmdline.db_file, split_list);
-			}
-		}
+		plot_histograms(grouping, category);
 
-		// Calculate statistics, write output files and plots
-		struct hash_table *bucket_sizes[2] = { hash_table_create(0, 0), hash_table_create(0, 0) };
-		write_avgs(split_category, category, units_of_measure, bucket_sizes);
-		plot_category(split_category, category, units_of_measure, bucket_sizes);
-		write_vs_units_plots(split_category, category, units_of_measure);
+		/* // Calculate statistics, write output files and plots */
+		/* write_avgs(split_category, category, units_of_measure, bucket_sizes); */
+		/* plot_category(split_category, category, units_of_measure, bucket_sizes); */
+		/* write_vs_units_plots(split_category, category, units_of_measure); */
 
-		// Free values from hash tables
-		char *output_field, *unit_str;
-		for ( int i=0; i<2; ++i ) {
-			double *bucket_size;
-			hash_table_firstkey(bucket_sizes[i]);
-			while ( hash_table_nextkey(bucket_sizes[i], &output_field, (void **)&bucket_size) != 0 )
-				free(bucket_size);
-		}
+		/* // Free values from hash tables */
+		/* char *output_field, *unit_str; */
+		/* for ( int i=0; i<2; ++i ) { */
+		/* 	double *bucket_size; */
+		/* 	hash_table_firstkey(bucket_sizes[i]); */
+		/* 	while ( hash_table_nextkey(bucket_sizes[i], &output_field, (void **)&bucket_size) != 0 ) */
+		/* 		free(bucket_size); */
+		/* } */
 
-		hash_table_firstkey(units_of_measure);
-		while ( hash_table_nextkey(units_of_measure, &output_field, (void **)&unit_str) != 0 )
-			free(unit_str);
-		hash_table_delete(units_of_measure);
-
-		hash_table_firstkey(split_category);
-		while ( hash_table_nextkey(split_category, &split_field, (void **)&split_list) ) {
-			list_delete(split_list);
+		struct list *value_list;
+		hash_table_firstkey(grouping);
+		for ( char *key; hash_table_nextkey(grouping, &key, (void **)&value_list); ) {
+			list_delete(value_list);
 		}
 
 		list_delete(list_in_category);
-		hash_table_delete(split_category);
+		hash_table_delete(grouping);
 	}
 
 	// Clean up
-	hash_table_delete(grouped_by_category);
+	hash_table_delete(hashed_by_category);
+	hash_table_firstkey(units_of_measure);
+	for ( char *field, *unit_str; hash_table_nextkey(units_of_measure, &field, (void **)&unit_str) != 0; ) {
+		free(unit_str);
+	}
+	hash_table_delete(units_of_measure);
 
 	// Clean up list of all summaries
 	struct record *item;

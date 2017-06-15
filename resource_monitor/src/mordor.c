@@ -226,11 +226,11 @@ static void mordor_datafile_clean(struct mordor *m, struct keyvalue_pair *sorted
 		STATE_NOT_STARTED=0, STATE_STARTED, STATE_FINISHED
 	} *state = xxcalloc(num_mountains, sizeof(*state));
 
-	// Padding each side with a line of zeros helps the plotter
-	fprintf(out, "%g" OUTPUT_FIELD_SEPARATOR "0", cumulative_buckets[0] - m->bucket_size);
+	// Padding beginning and end with a line of zeros helps the plotter
+	fprintf(out, "%f" OUTPUT_FIELD_SEPARATOR "0", cumulative_buckets[0] - m->bucket_size);
 	for ( int mtn=0; mtn < num_mountains; ++mtn ) {
-		// If next bucket starts the mountain, write a zero
-		if ( cumulative_buckets[0] >= start[mtn] ) {
+		// If first bucket starts the mountain, write a zero
+		if ( cumulative_buckets[0] + 0.5*m->bucket_size >= start[mtn] ) {
 			state[mtn] = STATE_STARTED;
 			fprintf(out, OUTPUT_FIELD_SEPARATOR "0");
 		} else {
@@ -242,24 +242,30 @@ static void mordor_datafile_clean(struct mordor *m, struct keyvalue_pair *sorted
 	for ( int bucket = 0; bucket < num_buckets; ++bucket ) {
 		double pos = cumulative_buckets[bucket];
 	write_row:
-		fprintf(out, "%g" OUTPUT_FIELD_SEPARATOR "%d", pos, histogram_count(m->cumulative_hist, pos));
+		fprintf(out, "%f" OUTPUT_FIELD_SEPARATOR "%d", pos, histogram_count(m->cumulative_hist, pos));
 		for ( int mtn=0; mtn < num_mountains; ++mtn ) {
 			switch ( state[mtn] ) {
 			case STATE_FINISHED:
-				fprintf(out, OUTPUT_FIELD_SEPARATOR "NAN");
-				break;
+				if ( pos - 1.5*m->bucket_size < finish[mtn] ) {
+					fprintf(out, OUTPUT_FIELD_SEPARATOR "0");
+				} else {
+					fprintf(out, OUTPUT_FIELD_SEPARATOR "NAN");
+				}
+				continue;
 			case STATE_NOT_STARTED:
-				if ( pos + 1.5*m->bucket_size < start[mtn] )
-					break;
+				if ( pos + 1.5*m->bucket_size < start[mtn] ) {
+					fprintf(out, OUTPUT_FIELD_SEPARATOR "NAN");
+					continue;
+				}
 				state[mtn] = STATE_STARTED;
 				// (fall through)
 			case STATE_STARTED:
 			default:
 				if ( pos > finish[mtn] )
 					state[mtn] = STATE_FINISHED;
-				fprintf(out, OUTPUT_FIELD_SEPARATOR "%d", histogram_count(sorted[mtn].value->hist, pos));
 				break;
 			}
+			fprintf(out, OUTPUT_FIELD_SEPARATOR "%d", histogram_count(sorted[mtn].value->hist, pos));
 		}
 		fprintf(out, OUTPUT_RECORD_SEPARATOR);
 
@@ -271,7 +277,7 @@ static void mordor_datafile_clean(struct mordor *m, struct keyvalue_pair *sorted
 	}
 
 	// A last line of zeros to help the plotter
-	fprintf(out, "%g" OUTPUT_FIELD_SEPARATOR "0", cumulative_buckets[num_buckets - 1] + m->bucket_size);
+	fprintf(out, "%f" OUTPUT_FIELD_SEPARATOR "0", cumulative_buckets[num_buckets - 1] + m->bucket_size);
 	for ( int mtn=0; mtn < num_mountains; ++mtn ) {
 		if ( state[mtn] == STATE_STARTED ) {
 			fprintf(out, OUTPUT_FIELD_SEPARATOR "0");
@@ -288,7 +294,7 @@ static void mordor_datafile_clean(struct mordor *m, struct keyvalue_pair *sorted
 	free(cumulative_buckets);
 }
 
-static void mordor_plotscript_classic(struct mordor *m, struct keyvalue_pair *sorted, FILE *out, const char *data_name) {
+static void mordor_plotscript_classic(struct mordor *m, struct keyvalue_pair *sorted, FILE *out, const char *data_name, const char *pngfile) {
 	fprintf(out,
 	        "set terminal pngcairo enhanced size 1280,2048\n"
 	        "set key off\n"
@@ -297,8 +303,8 @@ static void mordor_plotscript_classic(struct mordor *m, struct keyvalue_pair *so
 	        "set xtics font ',20'\n"
 	        "set style line 1 lc rgb 'black'\n"
 	        "set style line 2 lc rgb 'grey90'\n"
-	        "set output 'test.png'\n"
-	        "set multiplot layout 2,1");
+	        "set output '%s'\n"
+	        "set multiplot layout 2,1", pngfile);
 	if ( m->title == NULL ) {
 		fprintf(out, "\n");
 	} else {
@@ -354,7 +360,7 @@ static void mordor_plotscript_classic(struct mordor *m, struct keyvalue_pair *so
 	fprintf(out, "unset multiplot\n");
 }
 
-static void mordor_plotscript_clean(struct mordor *m, struct keyvalue_pair *sorted, FILE *out, const char *data_name) {
+static void mordor_plotscript_clean(struct mordor *m, struct keyvalue_pair *sorted, FILE *out, const char *data_name, const char *pngfile) {
 	fprintf(out,
 	        "set terminal pngcairo enhanced size 1280,2071\n" // golden ratio
 	        "set key off\n"
@@ -364,8 +370,8 @@ static void mordor_plotscript_clean(struct mordor *m, struct keyvalue_pair *sort
 	        "set rmargin at screen 0.99\n"
 	        "set style line 1 lc rgb 'black' lw 5\n"
 	        "set style line 2 lc rgb 'white'\n"
-	        "set style line 3 lc rgb 'gray50' lw 1\n"
-	        "set output 'test.png'\n");
+	        "set style line 3 lc rgb 'gray50' lw 1 lt 0\n"
+	        "set output '%s'\n", pngfile);
 
 	// Multiplot with optional title string
 	fprintf(out, "set multiplot layout 2,1");
@@ -403,7 +409,7 @@ static void mordor_plotscript_clean(struct mordor *m, struct keyvalue_pair *sort
 	}
 	if ( m->ylabel != NULL )
 		fprintf(out, "set ylabel '%s' font ',20'\n", m->ylabel);
-	fprintf(out, "plot '%s' using 1:2 with filledcurves above x2 ls 2 lw 7 notitle\n\n", data_name);
+	fprintf(out, "plot '%s' using 1:2 with filledcurves above x2 ls 2 lw 6 notitle\n\n", data_name);
 
 	// Lower plot: Individual mountains
 	fprintf(out,
@@ -411,8 +417,9 @@ static void mordor_plotscript_clean(struct mordor *m, struct keyvalue_pair *sort
 	        "set origin 0,0\n"
 	        "set bmargin 4\n"
 	        "set tmargin 0\n"
-	        "unset grid\n"
-	        "set border 1 lw 7\n"
+	        //"unset grid\n"
+	        "set grid xtics ls 3\n"
+	        "set border 1 lw 6\n"
 	        "set style fill transparent solid 0.8 border lc rgb 'black'\n"
 	        "set xtics out scale default nomirror font ',20'\n"
 	        "set format x '%%g'\n"
@@ -441,7 +448,7 @@ static void mordor_plotscript_clean(struct mordor *m, struct keyvalue_pair *sort
 	fprintf(out, "unset multiplot\n");
 }
 
-void mordor_plot(struct mordor *m, const char *data_name, const char *gnuplot_file) {
+void mordor_plot(struct mordor *m, const char *pngfile, FILE *data, FILE *gnuplot, const char *datafile) {
 	// Refresh histograms if needed
 	mordor_build_histograms(m);
 
@@ -449,26 +456,17 @@ void mordor_plot(struct mordor *m, const char *data_name, const char *gnuplot_fi
 	// some visual continuity to the result.
 	struct keyvalue_pair *sorted = create_sorted_keys(m);
 
-	FILE *data, *gnuplot;
-	if ( (data = fopen(data_name, "w")) == NULL )
-		fatal("Can't open \"%s\" for writing.", data_name);
-	if ( (gnuplot = fopen(gnuplot_file, "w")) == NULL )
-		fatal("Can't open \"%s\" for writing.", gnuplot_file);
-
 	switch ( m->style ) {
 	case MORDOR_STYLE_CLASSIC:
 		mordor_datafile_classic(m, sorted, data);
-		mordor_plotscript_classic(m, sorted, gnuplot, data_name);
+		mordor_plotscript_classic(m, sorted, gnuplot, datafile, pngfile);
 		break;
 	case MORDOR_STYLE_CLEAN:
 	default:
 		mordor_datafile_clean(m, sorted, data);
-		mordor_plotscript_clean(m, sorted, gnuplot, data_name);
+		mordor_plotscript_clean(m, sorted, gnuplot, datafile, pngfile);
 		break;
 	}
-
-	fclose(data);
-	fclose(gnuplot);
 	free(sorted);
 }
 
