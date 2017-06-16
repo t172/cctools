@@ -33,16 +33,16 @@ See the file COPYING for details.
 #define FIELD_TASK_ID "task_id"
 #define FIELD_WALL_TIME "wall_time"
 
-/* // Data file formats */
-/* #define OUTPUT_FIELD_SEPARATOR " " */
-/* #define OUTPUT_RECORD_SEPARATOR "\n" */
-/* #define OUTPUT_COMMENT "#" */
-/* #define OUTPUT_PLACEHOLDER "NAN" */
+// Data file formats
+#define OUTPUT_FIELD_SEPARATOR " "
+#define OUTPUT_RECORD_SEPARATOR "\n"
+#define OUTPUT_COMMENT "#"
+#define OUTPUT_PLACEHOLDER "NAN"
 
 /* // Name used for cumulative stats (used in filename) */
 /* #define ALLSTATS_NAME "(all)" */
 
-/* #define VSUNITS_NAME "vs_units" */
+#define VSUNITS_NAME "vs_units"
 
 #define SUBDIR_DATA "data"
 #define SUBDIR_PLOT ""
@@ -118,6 +118,8 @@ struct hash_table *units_of_measure;
 /* static int string_compare(const void *a, const void *b) { */
 /* 	return strcmp(*(char *const *)a, *(char *const *)b); */
 /* } */
+
+static double get_value(struct record *item, const char *field);
 
 // Creates a new record pointing to the given JSON, which must be
 // freed with record_delete().
@@ -231,14 +233,13 @@ void process_cmdline(int argc, char *argv[]) {
 
 	// Default output fields
 	if ( cmdline.fields == NULL ) {
-		cmdline.num_fields = 1;//
-		/* cmdline.num_fields = 4; */
+		cmdline.num_fields = 5;
 		cmdline.fields = xxmalloc(cmdline.num_fields*sizeof(*cmdline.fields));
-		/* cmdline.fields[0] = "wall_time"; */
-		/* cmdline.fields[1] = "cpu_time"; */
-		cmdline.fields[0] = "cpu_time";
-		/* cmdline.fields[2] = "memory"; */
-		/* cmdline.fields[3] = "disk"; */
+		cmdline.fields[0] = "wall_time";
+		cmdline.fields[1] = "cpu_time";
+		cmdline.fields[2] = "memory";
+		cmdline.fields[3] = "disk";
+		cmdline.fields[4] = "bytes_received";
 	}
 }
 
@@ -483,128 +484,124 @@ static FILE *open_category_file(const char *category, const char *subdir, const 
 /* 	} */
 /* } */
 
-/* // Plots <output_field> vs. <work_units_processed>, regardless of */
-/* // split_key (e.g. host). */
-/* void write_vs_units_plots(struct hash_table *grouping, const char *category) { */
-/* 	// Find ways to give up */
-/* 	if ( hash_table_size(grouping) == 0 ) */
-/* 		return; */
-/* 	if ( category == NULL || category[0] == '\0' ) { */
-/* 		warn(D_RMON, "No category given or empty string."); */
-/* 		return; */
-/* 	} */
+// Plots <output_field> vs. <work_units_processed>, regardless of
+// split_key (e.g. host).
+void write_vs_units_plots(struct hash_table *grouping, const char *category) {
+	// Find ways to give up
+	if ( hash_table_size(grouping) == 0 )
+		return;
+	if ( category == NULL || category[0] == '\0' ) {
+		warn(D_RMON, "No category given or empty string.");
+		return;
+	}
 
-/* 	// Write data file header */
-/* 	FILE *out = open_category_file(category, SUBDIR_DATA, VSUNITS_NAME ".dat"); */
-/* 	fprintf(out, OUTPUT_COMMENT "" FIELD_TASK_ID "" OUTPUT_FIELD_SEPARATOR "units_processed" OUTPUT_FIELD_SEPARATOR "units"); */
-/* 	for ( int f=0; f < cmdline.num_fields; ++f ) { */
-/* 		fprintf(out, OUTPUT_FIELD_SEPARATOR "%s", cmdline.fields[f]); */
-/* 	} */
-/* 	fprintf(out, OUTPUT_RECORD_SEPARATOR); */
+	// Write data file header
+	FILE *out = open_category_file(category, SUBDIR_DATA, VSUNITS_NAME ".dat");
+	fprintf(out, OUTPUT_COMMENT "" FIELD_TASK_ID "" OUTPUT_FIELD_SEPARATOR "units_processed" OUTPUT_FIELD_SEPARATOR "units");
+	for ( int f=0; f < cmdline.num_fields; ++f ) {
+		fprintf(out, OUTPUT_FIELD_SEPARATOR "%s", cmdline.fields[f]);
+	}
+	fprintf(out, OUTPUT_RECORD_SEPARATOR);
 
-/* 	const int UNITS_PROCESSED = 0; */
-/* 	const int UNITS_TOTAL = 1; */
-/* 	const char *const display_string[] = { "Work Units Processed", "Total Work Units" }; */
-/* 	const char *const name_string[] = { "units_processed", "units_total" }; */
+	const int UNITS_PROCESSED = 0;
+	const int UNITS_TOTAL = 1;
+	const char *const display_string[] = { "Work Units Processed", "Total Work Units" };
+	const char *const name_string[] = { "units_processed", "units_total" };
 
-/* 	// Keep two-dimensional stats of {units_processed,units} vs. {all output fields} */
-/* 	struct stats2 (*stat)[2] = xxmalloc(cmdline.num_fields*sizeof(*stat)); */
-/* 	for ( int f=0; f < cmdline.num_fields; ++f ) { */
-/* 		stats2_init(&stat[f][UNITS_PROCESSED]); */
-/* 		stats2_init(&stat[f][UNITS_TOTAL]); */
-/* 	} */
+	// Keep two-dimensional stats of {units_processed,units} vs. {all output fields}
+	struct stats2 (*stat)[2] = xxmalloc(cmdline.num_fields*sizeof(*stat));
+	for ( int f=0; f < cmdline.num_fields; ++f ) {
+		stats2_init(&stat[f][UNITS_PROCESSED]);
+		stats2_init(&stat[f][UNITS_TOTAL]);
+	}
 
-/* 	// Write data */
-/* 	char *ignored_key; */
-/* 	hash_table_firstkey(grouping); */
-/* 	for ( struct list *record_list; hash_table_nextkey(grouping, &ignored_key, (void **)&record_list); ) { */
-/* 		list_first_item(record_list); */
-/* 		for ( struct record *item; (item = list_next_item(record_list)) != NULL; ) { */
-/* 			struct jx *task_id_jx; */
-/* 			const char *task_id = NULL; */
-/* 			if ( (task_id_jx = jx_lookup(item->json, FIELD_TASK_ID)) != NULL && task_id_jx->type == JX_STRING ) */
-/* 				task_id = task_id_jx->u.string_value; */
-/* 			fprintf(out, "%s" OUTPUT_FIELD_SEPARATOR "%d" OUTPUT_FIELD_SEPARATOR "%d", */
-/* 							task_id, item->work_units_processed, item->work_units_total); */
-/* 			for ( int f=0; f < cmdline.num_fields; ++f ) { */
-/* 				double value; */
-/* 				if ( !get_json_value(item, cmdline.fields[f], NULL, &value) ) { */
-/* 					fprintf(out, OUTPUT_FIELD_SEPARATOR "" OUTPUT_PLACEHOLDER); */
-/* 				} else { */
-/* 					fprintf(out, OUTPUT_FIELD_SEPARATOR "%g", value); */
-/* 					stats2_insert(&stat[f][UNITS_PROCESSED], item->work_units_processed, value); */
-/* 					stats2_insert(&stat[f][UNITS_TOTAL], item->work_units_total, value); */
-/* 				} */
-/* 			} */
-/* 			fprintf(out, OUTPUT_RECORD_SEPARATOR); */
-/* 		} */
-/* 	} */
-/* 	fclose(out); */
+	// Write data
+	char *ignored_key;
+	hash_table_firstkey(grouping);
+	for ( struct list *record_list; hash_table_nextkey(grouping, &ignored_key, (void **)&record_list); ) {
+		list_first_item(record_list);
+		for ( struct record *item; (item = list_next_item(record_list)) != NULL; ) {
+			struct jx *task_id_jx;
+			const char *task_id = NULL;
+			if ( (task_id_jx = jx_lookup(item->json, FIELD_TASK_ID)) != NULL && task_id_jx->type == JX_STRING )
+				task_id = task_id_jx->u.string_value;
+			fprintf(out, "%s" OUTPUT_FIELD_SEPARATOR "%d" OUTPUT_FIELD_SEPARATOR "%d",
+							task_id, item->work_units_processed, item->work_units_total);
+			for ( int f=0; f < cmdline.num_fields; ++f ) {
+				double value = get_value(item, cmdline.fields[f]);
+				fprintf(out, OUTPUT_FIELD_SEPARATOR "%f", value);
+				stats2_insert(&stat[f][UNITS_PROCESSED], item->work_units_processed, value);
+				stats2_insert(&stat[f][UNITS_TOTAL], item->work_units_total, value);
+			}
+			fprintf(out, OUTPUT_RECORD_SEPARATOR);
+		}
+	}
+	fclose(out);
 
-/* 	// Write a gnuplot script */
-/* 	out = open_category_file(category, SUBDIR_PLOT, "vs_units.gp"); */
-/* 	fprintf(out, "set terminal pngcairo enhanced size 1024,768\n"); */
-/* 	fprintf(out, "set tics font ',16'\n"); */
-/* 	fprintf(out, "set style line 1 lc rgb 'gray20' pt 7\n"); */
-/* 	fprintf(out, "set style line 2 lc rgb '#880000' lw 4\n"); */
-/* 	fprintf(out, "set style fill transparent solid 0.1 noborder\n"); */
-/* 	fprintf(out, "unset key\n"); */
-/* 	fprintf(out, "set yrange [0:]\n"); */
+	// Write a gnuplot script
+	out = open_category_file(category, SUBDIR_PLOT, "vs_units.gp");
+	fprintf(out, "set terminal pngcairo enhanced size 1024,768\n");
+	fprintf(out, "set tics font ',16'\n");
+	fprintf(out, "set style line 1 lc rgb 'gray20' pt 7\n");
+	fprintf(out, "set style line 2 lc rgb '#880000' lw 4\n");
+	fprintf(out, "set style fill transparent solid 0.1 noborder\n");
+	fprintf(out, "unset key\n");
+	fprintf(out, "set yrange [0:]\n");
 	
-/* 	for ( int f=0; f < cmdline.num_fields; ++f ) { */
-/* 		const char *pretty_field = presentation_string(cmdline.fields[f]); */
-/* 		for ( int u=0; u < 2; ++u ) { */
-/* 			fprintf(out, "\n# %s vs. %s\n", pretty_field, display_string[u]); */
-/* 			fprintf(out, "set output '%s_vs_%s.png'\n", cmdline.fields[f], name_string[u]); */
-/* 			fprintf(out, "set title '%s vs. %s  (%ld \"%s\" Summaries)' font ',22'\n", */
-/* 							pretty_field, display_string[u], stat[f][u].count, category); */
-/* 			fprintf(out, "set xlabel '%s' font ',20'\n", display_string[u]); */
-/* 			double left = stat[f][u].min_x - 0.01*(stat[f][u].max_x - stat[f][u].min_x); */
-/* 			fprintf(out, "set xrange [%g:%g]\n", left<0 ? left : 0, stat[f][u].max_x + 0.01*(stat[f][u].max_x - stat[f][u].min_x)); */
-/* 			const char *unit_string = hash_table_lookup(units_of_measure, cmdline.fields[f]); */
-/* 			const char *original_unit = unit_string; */
-/* 			double unit_conversion = 1; */
-/* 			if ( strcmp(unit_string, "MB") == 0 ) { */
-/* 				// Convert MB to GB */
-/* 				unit_string = "GB"; */
-/* 				fprintf(out, "convert_unit(y) = y/1024\n"); */
-/* 				unit_conversion = 1024; */
-/* 			} else if ( strcmp(unit_string, "s" ) == 0 ) { */
-/* 				// Convert s to hr */
-/* 				unit_string = "hr"; */
-/* 				fprintf(out, "convert_unit(y) = y/3600\n"); */
-/* 				unit_conversion = 3600; */
-/* 			} else { */
-/* 				fprintf(out, "convert_unit(y) = y\n"); */
-/* 				unit_conversion = 1; */
-/* 			} */
-/* 			fprintf(out, "set ylabel '%s", pretty_field); */
-/* 			if ( unit_string != NULL ) { */
-/* 				fprintf(out, " (%s)", unit_string); */
-/* 			} */
-/* 			fprintf(out, "' font ',20'\n"); */
-/* 			fprintf(out, "set style circle radius %g\n", 0.01*stat[f][u].max_x); */
+	for ( int f=0; f < cmdline.num_fields; ++f ) {
+		const char *pretty_field = presentation_string(cmdline.fields[f]);
+		for ( int u=0; u < 2; ++u ) {
+			fprintf(out, "\n# %s vs. %s\n", pretty_field, display_string[u]);
+			fprintf(out, "set output '%s_vs_%s.png'\n", cmdline.fields[f], name_string[u]);
+			fprintf(out, "set title '%s vs. %s  (%ld \"%s\" Tasks)' font ',22'\n",
+							pretty_field, display_string[u], stat[f][u].count, category);
+			fprintf(out, "set xlabel '%s' font ',20'\n", display_string[u]);
+			double left = stat[f][u].min_x - 0.01*(stat[f][u].max_x - stat[f][u].min_x);
+			fprintf(out, "set xrange [%f:%f]\n", left<0 ? left : 0, stat[f][u].max_x + 0.01*(stat[f][u].max_x - stat[f][u].min_x));
+			const char *unit_string = hash_table_lookup(units_of_measure, cmdline.fields[f]);
+			const char *original_unit = unit_string;
+			double unit_conversion = 1;
+			if ( strcmp(unit_string, "MB") == 0 ) {
+				// Convert MB to GB
+				unit_string = "GB";
+				fprintf(out, "convert_unit(y) = y/1024\n");
+				unit_conversion = 1024;
+			} else if ( strcmp(unit_string, "s" ) == 0 ) {
+				// Convert s to hr
+				unit_string = "hr";
+				fprintf(out, "convert_unit(y) = y/3600\n");
+				unit_conversion = 3600;
+			} else {
+				fprintf(out, "convert_unit(y) = y\n");
+				unit_conversion = 1;
+			}
+			fprintf(out, "set ylabel '%s", pretty_field);
+			if ( unit_string != NULL ) {
+				fprintf(out, " (%s)", unit_string);
+			}
+			fprintf(out, "' font ',20'\n");
+			fprintf(out, "set style circle radius %f\n", 0.01*stat[f][u].max_x);
 
-/* 			double a, b; */
-/* 			const int have_regression = stats2_linear_regression(&stat[f][u], &a, &b); */
-/* 			if ( have_regression ) { */
-/* 				fprintf(out, "set label 1 \"{/Oblique y} = (%2$g %1$s){/Oblique x} + (%3$g %1$s)\\n" */
-/* 								"correlation %4$f\" at screen 0.52,0.17 left font ',18'\n", */
-/* 								original_unit, a, b,	stats2_linear_correlation(&stat[f][u])); */
-/* 			} else { */
-/* 				fprintf(out, "set label 1 \"\"\n"); */
-/* 			} */
-/* 			fprintf(out, "plot '%s%s" VSUNITS_NAME ".dat'", SUBDIR_DATA, SUBDIR_DATA[0] != '\0' ? "/" : ""); */
-/* 			fprintf(out, " using %d:(convert_unit($%d)) with circles ls 1 notitle", u+2, f+4); */
-/* 			if ( have_regression ) { */
-/* 				fprintf(out, ", \\\n\tconvert_unit(%g*x + %g) with lines ls 2 notitle\n", a, b); */
-/* 			} else { */
-/* 				fprintf(out, "\n"); */
-/* 			} */
-/* 		} */
-/* 	}  */
-/* 	fclose(out); */
-/* } */
+			double a, b;
+			const int have_regression = stats2_linear_regression(&stat[f][u], &a, &b);
+			if ( have_regression ) {
+				fprintf(out, "set label 1 \"{/Oblique y} = (%2$g %1$s){/Oblique x} + (%3$g %1$s)\\n"
+								"correlation %4$f\" at screen 0.52,0.17 left font ',18'\n",
+								original_unit, a, b,	stats2_linear_correlation(&stat[f][u]));
+			} else {
+				fprintf(out, "set label 1 \"\"\n");
+			}
+			fprintf(out, "plot '%s%s" VSUNITS_NAME ".dat'", SUBDIR_DATA, SUBDIR_DATA[0] != '\0' ? "/" : "");
+			fprintf(out, " using %d:(convert_unit($%d)) with circles ls 1 notitle", u+2, f+4);
+			if ( have_regression ) {
+				fprintf(out, ", \\\n\tconvert_unit(%f*x + %f) with lines ls 2 notitle\n", a, b);
+			} else {
+				fprintf(out, "\n");
+			}
+		}
+	}
+	fclose(out);
+}
 
 /* // Will populate bucket_sizes[0] with bucket sizes used for original */
 /* // histogram and bucket_sizes[1] with bucket sizes for the per-unit */
@@ -1113,14 +1110,14 @@ void plot_histograms(struct hash_table *grouping, char *category) {
 
 		char *title;  // title suffix
 		char *file;  // file name suffix
-		char *unit;  // unit suffix
+		char *divunit;  // "divided by" unit
 		
 		// Mordor histogram plot
 		struct mordor *plot;
 	} histograms[] = {
-//		{ .title = "", .file = "", .unit = "", .lambda = get_value },
-		{ .title = "Per Work Unit", .file = "_per_unit", .unit = "/unit", .lambda = get_value_per_units },
-//		{ .title = "Per Wall Time", .file = "_per_wall_time", .unit = "/s", .lambda = get_value_per_walltime },
+		{ .lambda = get_value },
+		{ .lambda = get_value_per_units, .title = "/Work Unit", .file = "_per_unit", .divunit = "unit" },
+		{ .lambda = get_value_per_walltime, .title = "/Wall Time", .file = "_per_wall_time", .divunit = hash_table_lookup(units_of_measure, FIELD_WALL_TIME) },
 		{ .lambda = NULL }  // null terminator
 	};
 
@@ -1149,27 +1146,44 @@ void plot_histograms(struct hash_table *grouping, char *category) {
 
 		// Plot
 		for ( int i=0; histograms[i].lambda; ++i ) {
-			char *data_name = string_format("%s%s.hist", field, histograms[i].file);
-			char *gnuplot_name = string_format("%s%s.gp", field, histograms[i].file);
-			char *png_name = string_format("%s%s%s%s.png", SUBDIR_PLOT, SUBDIR_PLOT[0] == '\0' ? "" : "/", field, histograms[i].file);
+			// Build file names
+			char *data_name = string_format("%s%s.hist", field, histograms[i].file ? histograms[i].file : "");
+			char *gnuplot_name = string_format("%s%s.gp", field, histograms[i].file ? histograms[i].file : "");
+			char *png_name = string_format("%s%s%s%s.png", SUBDIR_PLOT, SUBDIR_PLOT[0] == '\0' ? "" : "/", field, histograms[i].file ? histograms[i].file : "");
 			char *relative_name = string_format("%s%s%s", SUBDIR_DATA, SUBDIR_DATA[0] == '\0' ? "" : "/", data_name);
 
+			struct mordor *plot = histograms[i].plot;
+
+			char *field_unit = hash_table_lookup(units_of_measure, field);
+			char *field_str;
+			if ( histograms[i].divunit == NULL ) {
+				// No division
+				if ( field_unit == NULL ) {
+					field_str = string_format("%s%s", pretty_field, histograms[i].title ? histograms[i].title : "");
+				} else {
+					field_str = string_format("%s%s (%s)", pretty_field, histograms[i].title ? histograms[i].title : "", field_unit);
+				}
+			} else {
+				// Division by something
+				if ( field_unit == NULL )
+					field_unit = "1";
+				if ( strcmp(field_unit, histograms[i].divunit) == 0 ) {
+					field_str = string_format("%s%s", pretty_field, histograms[i].title ? histograms[i].title : "");
+				} else {
+					field_str = string_format("%s%s (%s/%s)", pretty_field, histograms[i].title ? histograms[i].title : "", field_unit, histograms[i].divunit);
+				}
+			}
+			plot->title = string_format("%s vs. %s for %ld \"%s\" Tasks", field_str,
+																	pretty_split, plot->cumulative_stats.count, category);
+
+			// Open files and plot
 			FILE *data = open_category_file(category, SUBDIR_DATA, data_name);
 			FILE *gnuplot = open_category_file(category, SUBDIR_PLOT, gnuplot_name);
-
-			struct mordor *plot = histograms[i].plot;
-			plot->title = string_format("%s %s vs. %s (%ld \"%s\" Tasks)", pretty_field, histograms[i].title, pretty_split, plot->cumulative_stats.count, category);
-			char *unit_str;
-			if ( (unit_str = hash_table_lookup(units_of_measure, field)) == NULL ) {
-				plot->xlabel = string_format("%s", pretty_field);
-			} else {
-				plot->xlabel = string_format("%s (%s)", pretty_field, unit_str);
-			}
-
 			mordor_plot(plot, png_name, data, gnuplot, relative_name);
 
-			free(plot->xlabel);
+			// Clean up
 			free(plot->title);
+			free(field_str);
 			fclose(gnuplot);
 			fclose(data);
 			free(relative_name);
@@ -1228,7 +1242,7 @@ int main(int argc, char *argv[]) {
 		/* // Calculate statistics, write output files and plots */
 		/* write_avgs(split_category, category, units_of_measure, bucket_sizes); */
 		/* plot_category(split_category, category, units_of_measure, bucket_sizes); */
-		/* write_vs_units_plots(split_category, category, units_of_measure); */
+		write_vs_units_plots(grouping, category);
 
 		/* // Free values from hash tables */
 		/* char *output_field, *unit_str; */

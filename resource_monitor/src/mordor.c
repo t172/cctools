@@ -362,7 +362,7 @@ static void mordor_plotscript_classic(struct mordor *m, struct keyvalue_pair *so
 
 static void mordor_plotscript_clean(struct mordor *m, struct keyvalue_pair *sorted, FILE *out, const char *data_name, const char *pngfile) {
 	fprintf(out,
-	        "set terminal pngcairo enhanced size 1280,2071\n" // golden ratio
+	        "set terminal pngcairo enhanced size 1280,2071\n"
 	        "set key off\n"
 	        "set border 1 lw 3\n"  // 1=bottom
 	        //"set lmargin at screen 0.18\n"
@@ -375,24 +375,30 @@ static void mordor_plotscript_clean(struct mordor *m, struct keyvalue_pair *sort
 
 	// Multiplot with optional title string
 	fprintf(out, "set multiplot layout 2,1");
-	if ( m->title == NULL ) {
+	/* if ( m->title == NULL ) { */
 		fprintf(out, "\n");
-	} else {
-		fprintf(out, " title '%s' font ',22'\n", m->title);
-	}
+	/* } else { */
+	/* 	fprintf(out, " title '%s' font ',24'\n", m->title); */
+	/* } */
 
 	// Set universal xrange
 	double *buckets = histogram_buckets(m->cumulative_hist);
 	int num_buckets = histogram_size(m->cumulative_hist);
 	if ( num_buckets > 0 ) {
-		fprintf(out, "set xrange [%g:%g]\n", buckets[0] - m->bucket_size, buckets[num_buckets - 1] + m->bucket_size);
+		double min = buckets[0] - m->bucket_size;
+		double max = buckets[num_buckets - 1] + m->bucket_size;
+		if ( min == max ) {
+			min -= 1.0;
+			max += 1.0;
+		}
+		fprintf(out, "set xrange [%g:%g]\n", min, max);
 	}
 	free(buckets);
 
 	// Upper plot: Cumulative histogram
 	fprintf(out,
-	        "set size 1,0.382\n"
-	        "set origin 0,0.618\n"
+	        "set size 1,0.3317\n"
+	        "set origin 0,0.6683\n"  // golden ratio, adjusted for space at bottom
 	        "set bmargin 0\n"
 	        "set grid xtics ls 3\n"
 	        "unset xlabel\n"
@@ -413,20 +419,20 @@ static void mordor_plotscript_clean(struct mordor *m, struct keyvalue_pair *sort
 
 	// Lower plot: Individual mountains
 	fprintf(out,
-	        "set size 1,0.618\n"
+	        "set size 1,0.6683\n"
 	        "set origin 0,0\n"
-	        "set bmargin 4\n"
+	        "set bmargin 6\n"
 	        "set tmargin 0\n"
 	        //"unset grid\n"
 	        "set grid xtics ls 3\n"
 	        "set border 1 lw 6\n"
 	        "set style fill transparent solid 0.8 border lc rgb 'black'\n"
-	        "set xtics out scale default nomirror font ',20'\n"
+	        "set xtics out scale default nomirror font 'Verdana,24'\n"
 	        "set format x '%%g'\n"
 	        "unset ylabel\n"
 	        "set format y ''\n");
-	if ( m->xlabel != NULL ) {
-		fprintf(out, "set xlabel '%s' font ',20'\n", m->xlabel);
+	if ( m->title != NULL ) {
+		fprintf(out, "set xlabel '%s' font 'Verdana,32' offset 0,-1\n", m->title);
 	}
 
 	const double yscale = 1.0;  // scale factor for height of mountains
