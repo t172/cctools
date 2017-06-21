@@ -56,6 +56,8 @@ double stats_mean(struct stats *s);
 double stats2_mean_x(struct stats2 *s);
 double stats2_mean_y(struct stats2 *s);
 
+double stats_variance(struct stats *s);
+
 // Calculates the standard deviation of the processed values
 double stats_stddev(struct stats *s);
 double stats2_stddev_x(struct stats2 *s);

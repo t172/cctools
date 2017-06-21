@@ -107,9 +107,13 @@ double stats2_mean_y(struct stats2 *s) {
 	return s->sum_y / s->count;
 }
 
-double stats_stddev(struct stats *s) {
+double stats_variance(struct stats *s) {
 	const double mean = stats_mean(s);
-	return sqrt(s->sum_squares / s->count - mean*mean);
+	return s->sum_squares/s->count - mean*mean;
+}
+
+double stats_stddev(struct stats *s) {
+	return sqrt(stats_variance(s));
 }
 
 double stats2_stddev_x(struct stats2 *s) {

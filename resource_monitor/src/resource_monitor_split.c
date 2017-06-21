@@ -108,8 +108,8 @@ struct record {
 	int work_units_processed;
 };
 
-// The previously encountered unit of measure (string), hashed by
-// output field
+// The previously encountered units of measure (the string paired with
+// the value in the JSON input), hashed by field
 struct hash_table *units_of_measure;
 
 static double get_value(struct record *item, const char *field);
@@ -226,13 +226,14 @@ void process_cmdline(int argc, char *argv[]) {
 
 	// Default output fields
 	if ( cmdline.fields == NULL ) {
-		cmdline.num_fields = 5;
+		/* cmdline.num_fields = 5; */
+		cmdline.num_fields = 1;
 		cmdline.fields = xxmalloc(cmdline.num_fields*sizeof(*cmdline.fields));
 		cmdline.fields[0] = "wall_time";
-		cmdline.fields[1] = "cpu_time";
-		cmdline.fields[2] = "memory";
-		cmdline.fields[3] = "disk";
-		cmdline.fields[4] = "bytes_received";
+		/* cmdline.fields[1] = "cpu_time"; */
+		/* cmdline.fields[2] = "memory"; */
+		/* cmdline.fields[3] = "disk"; */
+		/* cmdline.fields[4] = "bytes_received"; */
 	}
 }
 
@@ -476,7 +477,7 @@ void write_vs_units_plots(struct hash_table *grouping, const char *category) {
 			double a, b;
 			const int have_regression = stats2_linear_regression(&stat[f][u], &a, &b);
 			if ( have_regression ) {
-				fprintf(out, "set label 1 \"{/Oblique y} = (%2$g %1$s){/Oblique x} + (%3$g %1$s)\\n"
+				fprintf(out, "set label 1 \"{/Oblique y} = (%2$g %1$s/unit){/Oblique x} + (%3$g %1$s)\\n"
 								"correlation %4$f\" at screen 0.52,0.17 left font ',18'\n",
 								original_unit, a, b,	stats2_linear_correlation(&stat[f][u]));
 			} else {
@@ -492,6 +493,275 @@ void write_vs_units_plots(struct hash_table *grouping, const char *category) {
 		}
 	}
 	fclose(out);
+}
+
+// Given two host names, return non-zero if they have the same prefix
+// and only differ by a numeric (base 10) suffix, up to the first
+// period.  Be careful when using this as it may group IP addresses
+// undesirablely.
+static int similar_hostnames(const char *a, const char *b) {
+	// Skip matching prefix
+	while ( *a != '\0' && *b != '\0' && *a != '.' && *b != '.' && *a == *b ) {
+		a++;
+		b++;
+	}
+	if ( (*a == '\0' || *a == '.') && (*b == '\0' || *b == '.') )
+		return 1;  // same string
+
+	// Advance past a possible numeric suffix
+	while ( *a != '\0' && '0' <= *a && *a <= '9' )
+		a++;
+	while ( *b != '\0' && '0' <= *b && *b <= '9' )
+		b++;
+	if ( (*a == '\0' || *a == '.') && (*b == '\0' || *b == '.') )
+		return 1;
+	return 0;
+}
+
+struct linear_model {
+	double slope, intercept;
+};
+
+static double use_linear_model(double x, void *model) {
+	return ((struct linear_model *)model)->slope*x + ((struct linear_model *)model)->intercept;
+}
+
+void separate_host_groups(struct hash_table *grouping, const char *category) {
+	// Merge groups of hosts with similar names
+	struct hash_table *merged = hash_table_create(0, 0);
+	struct list *value_list;
+	hash_table_firstkey(grouping);
+	for ( char *key; hash_table_nextkey(grouping, &key, (void **)&value_list); ) {
+		int did_merge = 0;
+		struct list *merged_list;
+		hash_table_firstkey(merged);
+		for ( char *merged_key; hash_table_nextkey(merged, &merged_key, (void **)&merged_list); ) {
+			if ( similar_hostnames(key, merged_key) ) {
+				// Add value_list into merged
+				list_first_item(value_list);
+				for ( void *item; (item = list_next_item(value_list)) != NULL; ) {
+					list_push_tail(merged_list, item);
+				}
+				did_merge = 1;
+				break;
+			}
+		}
+		if ( !did_merge ) {
+			// Add new entry to merged
+			hash_table_insert(merged, key, list_duplicate(value_list));
+		}
+	}
+
+	struct list *merged_list;
+	hash_table_firstkey(merged);
+	for ( char *merged_key; hash_table_nextkey(merged, &merged_key, (void **)&merged_list); ) {
+		char *filename = string_format("group-%s.dat", merged_key);
+		FILE *group_file = open_category_file(category, SUBDIR_DATA, filename);
+		free(filename);
+
+		// Header
+		fprintf(group_file, OUTPUT_COMMENT "%s" OUTPUT_FIELD_SEPARATOR "task_id" OUTPUT_FIELD_SEPARATOR "units_processed" OUTPUT_FIELD_SEPARATOR "units", cmdline.split_field);
+		for ( int f=0; f < cmdline.num_fields; ++f ) {
+			fprintf(group_file, OUTPUT_FIELD_SEPARATOR "%s", cmdline.fields[f]);
+			char *unit = hash_table_lookup(units_of_measure, cmdline.fields[f]);
+			if ( unit != NULL )
+				fprintf(group_file, "[%s]", unit);
+		}
+		fprintf(group_file, OUTPUT_RECORD_SEPARATOR);
+
+		// Data
+		list_first_item(merged_list);
+		for ( struct record *item; (item = list_next_item(merged_list)) != NULL; ) {
+			struct jx *value = jx_lookup(item->json, cmdline.split_field);
+			if ( value == NULL || !jx_istype(value, JX_STRING) ) {
+				fprintf(group_file, "?");
+			} else {
+				fprintf(group_file, "%s", value->u.string_value);
+			}
+			if ( (value = jx_lookup(item->json, FIELD_TASK_ID)) == NULL || !jx_istype(value, JX_STRING) ) {
+				fprintf(group_file, OUTPUT_FIELD_SEPARATOR "?");
+			} else {
+				fprintf(group_file, OUTPUT_FIELD_SEPARATOR "%s", value->u.string_value);
+			}
+			fprintf(group_file, OUTPUT_FIELD_SEPARATOR "%d" OUTPUT_FIELD_SEPARATOR "%d", item->work_units_processed, item->work_units_total);
+			for ( int f=0; f < cmdline.num_fields; ++f ) {
+				fprintf(group_file, OUTPUT_FIELD_SEPARATOR "%g", get_value(item, cmdline.fields[f]));
+			}
+			fprintf(group_file, OUTPUT_RECORD_SEPARATOR);
+		}
+		fclose(group_file);
+	}
+
+	for ( int f=0; f < cmdline.num_fields; ++f ) {
+		const char *const field = cmdline.fields[f];
+		printf("Analysis of grouped %s\n", field);
+		struct stats cumulative_y;
+		struct stats2 cumulative_xy;
+		stats_init(&cumulative_y);
+		stats2_init(&cumulative_xy);
+
+		// Linear fit data file
+		char *filename = string_format("%s_vs_units-group.dat", field);
+		FILE *out = open_category_file(category, SUBDIR_DATA, filename);
+		free(filename);
+		fprintf(out, OUTPUT_COMMENT "group(%s)" OUTPUT_FIELD_SEPARATOR "N" OUTPUT_FIELD_SEPARATOR "chi2/(N-2)" OUTPUT_FIELD_SEPARATOR "correlation", cmdline.split_field);
+		char *field_unit = hash_table_lookup(units_of_measure, field);
+		fprintf(out, OUTPUT_FIELD_SEPARATOR "slope[%s/unit]" OUTPUT_FIELD_SEPARATOR "intercept", field_unit ? field_unit : "1");
+		if ( field_unit ) {
+			fprintf(out, "[%s]", field_unit);
+		}
+		fprintf(out, OUTPUT_FIELD_SEPARATOR "outliers" OUTPUT_FIELD_SEPARATOR "refit_correlation");
+		fprintf(out, OUTPUT_FIELD_SEPARATOR "refit_slope[%s/unit]" OUTPUT_FIELD_SEPARATOR "refit_intercept", field_unit ? field_unit : "1");
+		if ( field_unit ) {
+			fprintf(out, "[%s]", field_unit);
+		}
+
+		fprintf(out, OUTPUT_RECORD_SEPARATOR);
+		hash_table_firstkey(merged);
+		for ( char *key; hash_table_nextkey(merged, &key, (void **)&value_list); ) {
+			if ( list_size(value_list) < 3 )
+				continue;
+
+			struct stats y;
+			struct stats2 xy;
+			stats2_init(&xy);
+			stats_init(&y);
+
+			// Feed data
+			list_first_item(value_list);
+			for ( struct record *item; (item = list_next_item(value_list)) != NULL; ) {
+				double value = get_value(item, field);
+				stats_insert(&y, value);
+				stats2_insert(&xy, item->work_units_processed, value);
+				stats_insert(&cumulative_y, value);
+				stats2_insert(&cumulative_xy, item->work_units_processed, value);
+			}
+
+			// Fit to linear model
+			struct linear_model model;
+			if ( stats2_linear_regression(&xy, &model.slope, &model.intercept) ) {
+				// Calculate residuals
+				struct stats residuals;
+				stats_init(&residuals);
+				list_first_item(value_list);
+				for ( struct record *item; (item = list_next_item(value_list)) != NULL; ) {
+					stats_insert(&residuals, get_value(item, field) - use_linear_model(item->work_units_processed, &model));
+				}
+
+				// Print original fit results
+				fprintf(out, "%s", key);
+				fprintf(out, OUTPUT_FIELD_SEPARATOR "%ld", y.count);
+				fprintf(out, OUTPUT_FIELD_SEPARATOR "%f", (residuals.sum_squares/stats_variance(&y))/(y.count - 2));
+				fprintf(out, OUTPUT_FIELD_SEPARATOR "%f", stats2_linear_correlation(&xy));
+				fprintf(out, OUTPUT_FIELD_SEPARATOR "%f", model.slope);
+				fprintf(out, OUTPUT_FIELD_SEPARATOR "%f", model.intercept);
+
+				// Throw away outliers and refit
+				const double Q1 = stats_Q1(&residuals);
+				const double Q3 = stats_Q3(&residuals);
+				const double IQR = 1.5*abs(Q3 - Q1);
+				struct stats2 refit_xy;
+				stats2_init(&refit_xy);
+				struct list *outliers = list_create();
+				struct outlier {
+					char *id;
+					int x;
+					double y;
+					double residual;
+				};
+				list_first_item(value_list);
+				for ( struct record *item; (item = list_next_item(value_list)) != NULL; ) {
+					const double y_value = get_value(item, field);
+					const double r = y_value - use_linear_model(item->work_units_processed, &model);
+					if ( r >= Q1 - IQR && r <= Q3 + IQR ) {
+						stats2_insert(&refit_xy, item->work_units_processed, y_value);
+					} else {
+						// Save outlier's task ID
+						struct outlier *o = xxmalloc(sizeof(*o));
+						struct jx *jx_id = jx_lookup(item->json, FIELD_TASK_ID);
+						if ( jx_id->type != JX_STRING ) {
+							o->id = "?";
+						} else {
+							o->id = jx_id->u.string_value;
+						}
+						o->x = item->work_units_processed;
+						o->y = y_value;
+						o->residual = r;
+						list_push_tail(outliers, o);
+					}
+				}
+
+				// Print refit results
+				fprintf(out, OUTPUT_FIELD_SEPARATOR "%d", list_size(outliers));
+				struct linear_model refit_model;
+				if ( !stats2_linear_regression(&refit_xy, &refit_model.slope, &refit_model.intercept) ) {
+					fprintf(out, OUTPUT_FIELD_SEPARATOR "NAN" OUTPUT_FIELD_SEPARATOR "NAN" OUTPUT_FIELD_SEPARATOR "NAN");
+				} else {
+					fprintf(out, OUTPUT_FIELD_SEPARATOR "%f", stats2_linear_correlation(&refit_xy));
+					fprintf(out, OUTPUT_FIELD_SEPARATOR "%f", refit_model.slope);
+					fprintf(out, OUTPUT_FIELD_SEPARATOR "%f", refit_model.intercept);
+				}
+				fprintf(out, OUTPUT_RECORD_SEPARATOR);
+
+				// Print outliers file
+				if ( list_size(outliers) > 0 ) {
+					char *outlier_filename = string_format("%s_vs_units-outliers-%s.dat", field, key);
+					FILE *outlier_file = open_category_file(category, SUBDIR_DATA, outlier_filename);
+					free(outlier_filename);
+
+					fprintf(outlier_file, OUTPUT_COMMENT "task_id" OUTPUT_FIELD_SEPARATOR "units_processed" OUTPUT_FIELD_SEPARATOR "%s", field);
+					if ( field_unit ) {
+						fprintf(outlier_file, "[%s]", field_unit);
+					}
+					fprintf(outlier_file, OUTPUT_FIELD_SEPARATOR "residual" OUTPUT_RECORD_SEPARATOR);
+
+					list_first_item(outliers);
+					for ( struct outlier *o; (o = list_next_item(outliers)) != NULL; ) {
+						fprintf(outlier_file, "%s" OUTPUT_FIELD_SEPARATOR "%d" OUTPUT_FIELD_SEPARATOR "%g" OUTPUT_FIELD_SEPARATOR "%g" OUTPUT_RECORD_SEPARATOR,
+										o->id, o->x, o->y, o->residual);
+						free(o);
+					}
+					fclose(outlier_file);
+				}
+
+				list_delete(outliers);
+				stats2_free(&refit_xy);
+				stats_free(&residuals);
+			}  // have first linear_regression
+			stats_free(&y);
+			stats2_free(&xy);
+		}  // each key of merged
+		struct linear_model model;
+		if ( stats2_linear_regression(&cumulative_xy, &model.slope, &model.intercept) ) {
+			// Calculate residuals
+			struct stats residuals;
+			stats_init(&residuals);
+			hash_table_firstkey(merged);
+			for ( char *key; hash_table_nextkey(merged, &key, (void **)&value_list); ) {
+				list_first_item(value_list);
+				for ( struct record *item; (item = list_next_item(value_list)) != NULL; ) {
+					stats_insert(&residuals, get_value(item, field) - use_linear_model(item->work_units_processed, &model));
+				}
+			}
+				
+			fprintf(out, "(all)");
+			fprintf(out, OUTPUT_FIELD_SEPARATOR "%ld", cumulative_y.count);
+			fprintf(out, OUTPUT_FIELD_SEPARATOR "%f", (residuals.sum_squares/stats_variance(&cumulative_y))/(cumulative_y.count - 2));
+			fprintf(out, OUTPUT_FIELD_SEPARATOR "%f", stats2_linear_correlation(&cumulative_xy));
+			fprintf(out, OUTPUT_FIELD_SEPARATOR "%f", model.slope);
+			fprintf(out, OUTPUT_FIELD_SEPARATOR "%f" OUTPUT_RECORD_SEPARATOR, model.intercept);
+		}
+		fclose(out);
+		stats_free(&cumulative_y);
+		stats2_free(&cumulative_xy);
+	}  // each field
+
+	// Clean up
+	hash_table_firstkey(merged);
+	for ( char *key; hash_table_nextkey(merged, &key, (void **)&value_list); ) {
+		list_delete(value_list);
+	}
+	hash_table_delete(merged);
 }
 
 // Queries the database in db_file for the number of work units for
@@ -569,6 +839,7 @@ static double get_value(struct record *item, const char *field) {
 	} else if ( jx_value->type == JX_INTEGER ) {
 		return (double)jx_value->u.integer_value;
 	}
+	fatal("Unexpected or unhandled JX type: %d", jx_value->type);
 	return NAN; // failure
 }
 
@@ -717,6 +988,7 @@ int main(int argc, char *argv[]) {
 		// Plot stuff
 		plot_histograms(grouping, category);
 		write_vs_units_plots(grouping, category);
+		separate_host_groups(grouping, category);
 
 		struct list *value_list;
 		hash_table_firstkey(grouping);
