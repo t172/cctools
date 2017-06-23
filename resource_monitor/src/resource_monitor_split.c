@@ -432,19 +432,18 @@ void write_vs_units_plots(struct hash_table *grouping, const char *category) {
 
 	// Write a gnuplot script
 	out = open_category_file(category, SUBDIR_PLOT, "vs_units.gp");
-	fprintf(out, "set terminal pngcairo enhanced size 1024,768\n");
-	fprintf(out, "set tics font ',16'\n");
-	fprintf(out, "set style line 1 lc rgb 'gray20' pt 7\n");
-	fprintf(out, "set style line 2 lc rgb '#880000' lw 4\n");
-	fprintf(out, "set style fill transparent solid 0.1 noborder\n");
-	fprintf(out, "unset key\n");
-	fprintf(out, "set yrange [0:]\n");
-	
 	for ( int f=0; f < cmdline.num_fields; ++f ) {
 		const char *pretty_field = presentation_string(cmdline.fields[f]);
 		for ( int u=0; u < 2; ++u ) {
 			fprintf(out, "\n# %s vs. %s\n", pretty_field, display_string[u]);
+			fprintf(out, "reset\nset terminal pngcairo enhanced size 1024,768\n");
+			fprintf(out, "set tics font ',16'\n");
+			fprintf(out, "set style line 1 lc rgb 'gray20' pt 7\n");
+			fprintf(out, "set style line 2 lc rgb '#880000' lw 4\n");
+			fprintf(out, "unset key\n");
+			fprintf(out, "set yrange [0:]\n");
 			fprintf(out, "set output '%s_vs_%s.png'\n", cmdline.fields[f], name_string[u]);
+			fprintf(out, "set style fill transparent solid 0.1 noborder\n");
 			fprintf(out, "set title '%s vs. %s  (%ld \"%s\" Tasks)' font ',22'\n",
 							pretty_field, display_string[u], stat[f][u].count, category);
 			fprintf(out, "set xlabel '%s' font ',20'\n", display_string[u]);
@@ -490,6 +489,16 @@ void write_vs_units_plots(struct hash_table *grouping, const char *category) {
 			} else {
 				fprintf(out, "\n");
 			}
+
+			// Plain version
+			fprintf(out, "set terminal pngcairo enhanced size 512,384\n");
+			fprintf(out, "set output 'thumb-%s_vs_%s.png'\n", cmdline.fields[f], name_string[u]);
+			fprintf(out, "unset title\nunset tics\nunset xlabel\nunset ylabel\nunset label 1\n");
+			fprintf(out, "set style fill transparent solid 0.3 noborder\n");
+			fprintf(out, "set margins 0,0,0,0\n");
+			fprintf(out, "set border lw 2\n");
+			fprintf(out, "plot '%s%s" VSUNITS_NAME ".dat' using %d:(convert_unit($%d)) with circles ls 1 notitle\n",
+							SUBDIR_DATA, SUBDIR_DATA[0] != '\0' ? "/" : "", u+2, f+4);
 		}
 	}
 	fclose(out);
