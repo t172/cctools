@@ -55,6 +55,9 @@ struct mordor {
 	char *title;
 	char *xlabel;
 	char *ylabel;
+
+	// (Optional) Explicit x-range
+	double x_min, x_max;
 };
 
 // Creates a Mordor plot.  The returned pointer must be freed with
@@ -71,6 +74,14 @@ void mordor_insert(struct mordor *m, char *key, double value);
 // generate a file named pngfile.  The datafile is the name of the
 // data file relative to the gnuplot script.
 void mordor_plot(struct mordor *m, const char *pngfile, FILE *data, FILE *gnuplot, const char *datafile);
+
+// TODO: Have mordor_plot() invoke gnuplot itself, so we need only an
+// output PNG filename in the interface.  The current interface is
+// clunky and confusing.  We write a gnuplot script and a data file to
+// be read by that gnuplot script.  datafile (5th arg) is the path of
+// data (3rd arg) relative to the gnuplot script (4th arg).  We really
+// only need the first two arguments if we call gnuplot ourselves and
+// feed it both the script and data.
 
 #endif
 //EOF

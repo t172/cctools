@@ -7,6 +7,7 @@ See the file COPYING for details.
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 #include "mordor.h"
 #include "list.h"
@@ -59,6 +60,8 @@ struct mordor *mordor_create(void) {
 	m->title = NULL;
 	m->xlabel = NULL;
 	m->ylabel = NULL;
+	m->x_min = NAN;
+	m->x_max = NAN;
 
 	// Calculate histogram when needed
 	m->cumulative_hist = NULL;
@@ -391,6 +394,10 @@ static void mordor_plotscript_clean(struct mordor *m, struct keyvalue_pair *sort
 			min -= 1.0;
 			max += 1.0;
 		}
+		if ( !isnan(m->x_min) )
+			min = m->x_min;
+		if ( !isnan(m->x_max) )
+			max = m->x_max;
 		fprintf(out, "set xrange [%g:%g]\n", min, max);
 	}
 	free(buckets);
@@ -435,9 +442,27 @@ static void mordor_plotscript_clean(struct mordor *m, struct keyvalue_pair *sort
 		fprintf(out, "set xlabel '%s' font 'Verdana,32' offset 0,-1\n", m->title);
 	}
 
-	const double yscale = 1.0;  // scale factor for height of mountains
-	const double vspread = 1.5;  // separation between mountains
+	// Find the tallest individual mountain
+	double highest_peak = 0.0;
+	struct mordor_mountain *mtn;
+	hash_table_firstkey(m->table);
+	for ( char *key; hash_table_nextkey(m->table, &key, (void **)&mtn); ) {
+		double *buckets = histogram_buckets(mtn->hist);
+		for ( int i=0; i < histogram_size(mtn->hist); ++i ) {
+			const double this_height = histogram_count(mtn->hist, buckets[i]);
+			if ( highest_peak < this_height )
+				highest_peak = this_height;
+		}
+		free(buckets);
+	}
+	if ( highest_peak == 0.0 )
+		highest_peak = 1.0;
+
 	const int num_mountains = hash_table_size(m->table);
+	const double vspread = 1.5;  // separation between mountains
+	double yscale = 0.2*vspread*(num_mountains + 1)/highest_peak;  // scale factor for height of mountains
+	if ( yscale > 1.0 )
+		yscale = 1.0;  // don't make things bigger
 
 	/* // Custom ytics labels from keys */
 	/* int yskip = 1; */
@@ -455,6 +480,11 @@ static void mordor_plotscript_clean(struct mordor *m, struct keyvalue_pair *sort
 }
 
 void mordor_plot(struct mordor *m, const char *pngfile, FILE *data, FILE *gnuplot, const char *datafile) {
+	if ( m->cumulative_stats.count == 0 ) {
+		fprintf(stderr, "Warning: No values to plot\n");
+		return;
+	}
+
 	// Refresh histograms if needed
 	mordor_build_histograms(m);
 

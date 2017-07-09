@@ -451,20 +451,16 @@ void write_vs_units_plots(struct hash_table *grouping, const char *category) {
 			fprintf(out, "set xrange [%f:%f]\n", left<0 ? left : 0, stat[f][u].max_x + 0.01*(stat[f][u].max_x - stat[f][u].min_x));
 			const char *unit_string = hash_table_lookup(units_of_measure, cmdline.fields[f]);
 			const char *original_unit = unit_string;
-			double unit_conversion = 1;
 			if ( strcmp(unit_string, "MB") == 0 ) {
 				// Convert MB to GB
 				unit_string = "GB";
 				fprintf(out, "convert_unit(y) = y/1024\n");
-				unit_conversion = 1024;
 			} else if ( strcmp(unit_string, "s" ) == 0 ) {
 				// Convert s to hr
 				unit_string = "hr";
 				fprintf(out, "convert_unit(y) = y/3600\n");
-				unit_conversion = 3600;
 			} else {
 				fprintf(out, "convert_unit(y) = y\n");
-				unit_conversion = 1;
 			}
 			fprintf(out, "set ylabel '%s", pretty_field);
 			if ( unit_string != NULL ) {
@@ -773,6 +769,88 @@ void separate_host_groups(struct hash_table *grouping, const char *category) {
 	hash_table_delete(merged);
 }
 
+void unit_scale_by_host(struct hash_table *grouping, const char *category) {
+	struct mordor *plot = mordor_create();
+	FILE *out = open_category_file(category, SUBDIR_DATA, "unit_scale.dat");
+
+	long considered_tasks = 0;
+	struct list *item_list;
+	hash_table_firstkey(grouping);
+	for ( char *host; hash_table_nextkey(grouping, &host, (void **)&item_list); ) {
+		int num_items = list_size(item_list);
+		considered_tasks += num_items;
+		if ( num_items < 3 )
+			continue;
+
+		fprintf(out, "%s" OUTPUT_FIELD_SEPARATOR "%d", host, num_items);
+		struct stats2 xy;
+		stats2_init(&xy);
+		double *x = xxmalloc(num_items*sizeof(*x));
+		double *y = xxmalloc(num_items*sizeof(*y));
+
+		// Read values
+		list_first_item(item_list);
+		struct record *item;
+		for ( int i=0; (item = list_next_item(item_list)) != NULL; ++i ) {
+			x[i] = item->work_units_processed;
+			y[i] = get_value(item, FIELD_WALL_TIME);
+			stats2_insert(&xy, x[i], y[i]);
+		}
+
+		// Fit values to linear model and get residual
+		struct linear_model model;
+		if ( stats2_linear_regression(&xy, &model.slope, &model.intercept) ) {
+			// Use linear model
+			fprintf(out, OUTPUT_FIELD_SEPARATOR "%.6f" OUTPUT_FIELD_SEPARATOR "%.6f" OUTPUT_FIELD_SEPARATOR "%.6f",
+							stats2_linear_correlation(&xy), model.slope, model.intercept);
+			struct stats val;
+			stats_init(&val);
+			for ( int i=0; i < num_items; ++i ) {
+				stats_insert(&val, (y[i] - model.intercept)/model.slope/x[i]);
+			}
+			const double mean = stats_mean(&val);
+			for ( int i=0; i < val.count; ++i ) {
+				const double ratio = val.values[i]/mean;
+				mordor_insert(plot, host, ratio);
+				fprintf(out, OUTPUT_FIELD_SEPARATOR "%f", ratio);
+			}
+			stats_free(&val);
+		} else {
+			// Sometimes (e.g. LHEGS) we cannot use a linear model, because
+			// there is zero variance in work units (x).  In this case, we
+			// can just scale by the mean of the y-values, without using a
+			// linear model at all.
+			fprintf(out, OUTPUT_FIELD_SEPARATOR "NAN" OUTPUT_FIELD_SEPARATOR "NAN" OUTPUT_FIELD_SEPARATOR "NAN");
+			const double mean = stats2_mean_y(&xy);
+			for ( int i=0; i < num_items; ++i ) {
+				const double ratio = y[i]/mean;
+				mordor_insert(plot, host, ratio);
+				fprintf(out, OUTPUT_FIELD_SEPARATOR "%f", ratio);
+			}
+		}
+		fprintf(out, "\n");
+
+		// Clean up
+		free(x);
+		free(y);
+		stats2_free(&xy);
+	}
+	fclose(out);
+
+	// Write Mordor plot
+	FILE *datafile = open_category_file(category, SUBDIR_DATA, "unit_scale.hist");
+	FILE *gnuplot = open_category_file(category, SUBDIR_PLOT, "unit_scale.gp");
+	char *pretty = presentation_string(cmdline.split_field);
+	plot->title = string_format("Work Unit Scaling vs. %s for %ld \"%s\" Tasks", pretty, considered_tasks, category);
+	plot->x_min = 0.0;
+	plot->x_max = 2.0;
+	mordor_plot(plot, "unit_scale.png", datafile, gnuplot, SUBDIR_DATA "/" "unit_scale.hist");
+	mordor_delete(plot);
+	free(pretty);
+	fclose(gnuplot);
+	fclose(datafile);
+}
+
 // Queries the database in db_file for the number of work units for
 // tasks in a given list of records.
 void query_database_for_list(const char *db_file, struct list *list) {
@@ -994,17 +1072,22 @@ int main(int argc, char *argv[]) {
 		struct hash_table *grouping = hash_by_field(list_in_category, cmdline.split_field);
 		filter_by_threshold(grouping, cmdline.threshold);
 
+		//----------------
+
 		// Plot stuff
 		plot_histograms(grouping, category);
 		write_vs_units_plots(grouping, category);
-		separate_host_groups(grouping, category);
+		unit_scale_by_host(grouping, category);
+		//separate_host_groups(grouping, category);
 
+		//----------------
+
+		// Delete grouping
 		struct list *value_list;
 		hash_table_firstkey(grouping);
 		for ( char *key; hash_table_nextkey(grouping, &key, (void **)&value_list); ) {
 			list_delete(value_list);
 		}
-
 		list_delete(list_in_category);
 		hash_table_delete(grouping);
 	}

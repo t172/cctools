@@ -247,7 +247,7 @@ double stats_ideal_bucket_size(struct stats *s) {
 	double min = fabs(stats_minimum(s));
 	if ( max == min )
 		max += max/1e6;
-	return (max - min)/((int)sqrt(s->count));
+	return fabs(max - min)/((int)sqrt(s->count));
 }
 
 void stats_merge(struct stats *cumulative, struct stats *another) {

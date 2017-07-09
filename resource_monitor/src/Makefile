@@ -9,7 +9,7 @@ OBJECTS = resource_monitor_pb.o rmonitor_helper_comm.o resource_monitor.o resour
 PROGRAMS = resource_monitor piggybacker rmonitor_poll_example
 
 ifneq ($(CCTOOLS_STATIC),1)
-PROGRAMS += resource_monitor_histograms resource_monitor_split
+PROGRAMS += resource_monitor_histograms resource_monitor_split mordor
 endif
 
 # currently only python bindings have been implemented
@@ -44,6 +44,13 @@ ifeq ($(CCTOOLS_STATIC),1)
 	@echo "resource_monitor_split cannot be built statically"
 else
 	$(CCTOOLS_LD) -Wall -O3 -o $@ $(CCTOOLS_INTERNAL_LDFLAGS) $(LOCAL_LDFLAGS) $^ $(LOCAL_LINKAGE) $(CCTOOLS_EXTERNAL_LINKAGE) -lm -lsqlite3
+endif
+
+mordor: stats.o mordor.o mordor_plot.o
+ifeq ($(CCTOOLS_STATIC),1)
+	@echo "mordor standalone plotter cannot be built statically"
+else
+	$(CCTOOLS_LD) -Wall -O3 -o $@ $(CCTOOLS_INTERNAL_LDFLAGS) $(LOCAL_LDFLAGS) $^ $(LOCAL_LINKAGE) $(CCTOOLS_EXTERNAL_LINKAGE) -lm
 endif
 
 $(PROGRAMS): ../../dttools/src/libdttools.a
